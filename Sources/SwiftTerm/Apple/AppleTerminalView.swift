@@ -53,6 +53,9 @@ struct ViewLineInfo {
 var promptline = 0
 var promptcolumn = 0
 
+var savedCursorLine = 0
+var savedCursorColumn = 0
+
 extension TerminalView {
 
     typealias CellDimension = CGSize
@@ -415,12 +418,14 @@ extension TerminalView {
     fileprivate struct ViewLineSegmentBuilder {
         let column: Int
         let columnWidth: Int
+        let cellWidth: CGFloat
         private var attributedString = NSMutableAttributedString()
         private var characterCount: Int = 0
         
-        init(column: Int, columnWidth: Int) {
+        init(column: Int, columnWidth: Int, cellWidth: CGFloat) {
             self.column = column
             self.columnWidth = columnWidth
+            self.cellWidth = cellWidth
         }
         
         var isEmpty: Bool {
@@ -428,6 +433,50 @@ extension TerminalView {
         }
         
         mutating func append(text: String, attributes: [NSAttributedString.Key: Any]) {
+            // We need characters to occupy an integer number of columns, otherwise
+            // cursor position and arrow displacement will be off. Same with text
+            // insertion when switching from one language to another.
+            if (text != " ") && (text.count == 1) { // Don't do this scaling with spaces or long strings
+                let computedWidth = NSAttributedString(string: text, attributes: attributes).size().width
+                if (computedWidth > 2 * cellWidth) {
+                    // Scale downwards every character that is larger than 2 columns:
+                    // (applies to emojis)
+                    // (some emojis are larger than their computedWidth size, not much I can do here)
+                    if let font = attributes[.font] as? TTFont {
+                        let scalingFactor = 2 * cellWidth / computedWidth
+                        var newFont = TTFont(name: font.fontName, size: font.pointSize * scalingFactor)
+                        var newAttributes = attributes
+                        newAttributes[.font] = newFont
+                        attributedString.append(NSAttributedString(string: text, attributes: newAttributes))
+                        characterCount += 1
+                        return
+                    }
+                } else if (computedWidth > 1.4 * cellWidth) {
+                    // scale upwards characters in the 1.4-2 columns range so they fit on 2 columns:
+                    // (applies to CJK characters)
+                    if let font = attributes[.font] as? TTFont {
+                        let scalingFactor = 2 * cellWidth / computedWidth
+                        var newFont = TTFont(name: font.fontName, size: font.pointSize * scalingFactor)
+                        var newAttributes = attributes
+                        newAttributes[.font] = newFont
+                        attributedString.append(NSAttributedString(string: text, attributes: newAttributes))
+                        characterCount += 1
+                        return
+                    }
+                } else if (computedWidth > 1.1 * cellWidth) {
+                    // scale downwards characters in the 1.1-1.4 columns range so they fit on 1 column: 
+                    if let font = attributes[.font] as? TTFont {
+                        let scalingFactor = cellWidth / computedWidth
+                        var newFont = TTFont(name: font.fontName, size: font.pointSize * scalingFactor)
+                        var newAttributes = attributes
+                        newAttributes[.font] = newFont
+                        attributedString.append(NSAttributedString(string: text, attributes: newAttributes))
+                        characterCount += 1
+                        return
+                    }
+                }
+            }
+            // "Standard" characters are added directly:
             attributedString.append(NSAttributedString(string: text, attributes: attributes))
             characterCount += 1
         }
@@ -468,7 +517,7 @@ extension TerminalView {
                 if let finished = builder?.buildIfNeeded() {
                     segments.append(finished)
                 }
-                builder = ViewLineSegmentBuilder(column: col, columnWidth: width)
+                builder = ViewLineSegmentBuilder(column: col, columnWidth: width, cellWidth: cellDimension.width)
             }
             
             var currentAttributes = attributes
@@ -486,254 +535,7 @@ extension TerminalView {
             segments.append(finished)
         }
         
-        return ViewLineInfo(segments: segments, images: line.images)
-    }
-    
-    /// Returns the selection range for the specified row, if any.
-    func selectedColumnsRange(row: Int, cols: Int) -> Range<Int>? {
-        guard let selection = self.selection, selection.active else {
-            return nil
-        }
-
-        let startRow = selection.start.row
-        let endRow = selection.end.row
-        let startCol = selection.start.col
-        let endCol = selection.end.col
-
-        var selectionRange: NSRange = .empty
-
-        // single row
-        if endRow == startRow && startRow == row {
-            if startCol < endCol {
-                let extra = endCol == terminal.cols-1 ? 1 : 0
-                selectionRange = NSRange(location: startCol, length: endCol - startCol + extra)
-            } else if startCol > endCol {
-                selectionRange = NSRange(location: endCol, length: startCol - endCol)
-            }
-        } else if endRow > startRow {
-            // first row
-            if startRow == row && endRow > row {
-                selectionRange = NSRange(location: startCol, length: cols - startCol)
-            }
-
-            // in between
-            if startRow < row && endRow > row {
-                selectionRange = NSRange(location: 0, length: cols)
-            }
-
-            // last row
-            if startRow < row && endRow == row {
-                let extra = endCol == terminal.cols-1 ? 1 : 0
-                selectionRange = NSRange(location: 0, length: endCol + extra)
-            }
-        } else if endRow < startRow {
-            // first row
-            if endRow == row && startRow > row {
-                selectionRange = NSRange(location: endCol, length: cols - endCol)
-            }
-
-            // in between
-            if startRow > row && endRow < row {
-                selectionRange = NSRange(location: 0, length: cols)
-            }
-
-            // last row
-            if endRow < row && startRow == row {
-                let extra = startCol == terminal.cols-1 ? 1 : 0
-                selectionRange = NSRange(location: 0, length: startCol + extra)
-            }
-        }
-
-        if selectionRange == .empty || selectionRange.length == 0 {
-            return nil
-        }
-
-        let lowerBound = max(0, min(selectionRange.location, cols))
-        let upperBound = max(lowerBound, min(cols, selectionRange.location + selectionRange.length))
-        if lowerBound == upperBound {
-            return nil
-        }
-        return lowerBound..<upperBound
-    }
-    
-    func isColumnSelected(_ selectionRange: Range<Int>?, column: Int, width: Int) -> Bool {
-        guard let selectionRange else {
-            return false
-        }
-        let endColumn = column + width
-        return selectionRange.lowerBound < endColumn && column < selectionRange.upperBound
-    }
-
-    func drawRunAttributes(_ attributes: [NSAttributedString.Key : Any], glyphPositions positions: [CGPoint], in currentContext: CGContext) {
-        currentContext.saveGState()
-
-        let scale = backingScaleFactor()
-
-        if attributes.keys.contains(.underlineStyle) {
-            // draw underline at font.normal.underlinePosition baseline
-            let underlineStyle = NSUnderlineStyle(rawValue: attributes[.underlineStyle] as? NSUnderlineStyle.RawValue ?? 0)
-            let underlineColor = attributes[.underlineColor] as? TTColor ?? nativeForegroundColor
-            let underlinePosition = fontSet.underlinePosition ()
-
-            // draw line at the baseline
-            currentContext.setShouldAntialias(false)
-            currentContext.setStrokeColor(underlineColor.cgColor)
-
-            let underlineThickness = max(round(scale * fontSet.underlineThickness ()) / scale, 0.5)
-            for p in positions {
-                switch underlineStyle {
-                case let style where style.contains(.single):
-                    let path = TTBezierPath()
-                    path.move(to: p.applying(.init(translationX: 0, y: underlinePosition)))
-                    path.addLine(to: p.applying(.init(translationX: ceil(cellDimension.width), y: underlinePosition)))
-                    path.lineWidth = underlineThickness
-                    switch underlineStyle {
-                    case let pattern where pattern.contains(.patternDash):
-                        let pattern: [CGFloat] = [2.0]
-                        path.setLineDash(pattern, count: pattern.count, phase: 0)
-                    default:
-                        break
-                    }
-                    path.stroke()
-                case let style where style.contains(.double):
-                    let path1 = TTBezierPath()
-                    path1.move(to: p.applying(.init(translationX: 0, y: underlinePosition)))
-                    path1.addLine(to: p.applying(.init(translationX: ceil(cellDimension.width), y: underlinePosition)))
-                    path1.lineWidth = underlineThickness
-
-                    let path2 = TTBezierPath()
-                    path2.move(to: p.applying(.init(translationX: 0, y: underlinePosition - underlineThickness - 1)))
-                    path2.addLine(to: p.applying(.init(translationX: ceil(cellDimension.width), y: underlinePosition - underlineThickness - 1)))
-                    path2.lineWidth = underlineThickness
-
-                    switch underlineStyle {
-                    case let pattern where pattern.contains(.patternDash):
-                        let pattern: [CGFloat] = [2.0]
-                        path1.setLineDash(pattern, count: pattern.count, phase: 0)
-                        path2.setLineDash(pattern, count: pattern.count, phase: 0)
-                    default:
-                        break
-                    }
-                    path1.stroke()
-                    path2.stroke()
-                default:
-                    preconditionFailure("Unsupported underline style.")
-                    break
-                }
-            }
-        }
-        currentContext.restoreGState()
-    }
-
-    
-    // TODO: this should not render any lines outside the dirtyRect
-    func drawTerminalContents (dirtyRect: TTRect, context: CGContext, bufferOffset: Int)
-    {
-        let lineDescent = CTFontGetDescent(fontSet.normal)
-        let lineLeading = CTFontGetLeading(fontSet.normal)
-        let yOffset = ceil(lineDescent+lineLeading)
-
-        func calcLineOffset (forRow: Int) -> CGFloat {
-            cellDimension.height * CGFloat (forRow-bufferOffset+1)
-        }
-        // draw lines
-        #if os(iOS) || os(visionOS)
-        // On iOS, we are drawing the exposed region
-        let cellHeight = cellDimension.height
-        let firstRow = Int (dirtyRect.minY/cellHeight)
-        let lastRow = Int(dirtyRect.maxY/cellHeight)
-        #else
-        // On Mac, we are drawing the terminal buffer
-        let cellHeight = cellDimension.height
-        let boundsMaxY = bounds.maxY
-        let firstRow = terminal.buffer.yDisp+Int ((boundsMaxY-dirtyRect.maxY)/cellHeight)
-        let lastRow = terminal.buffer.yDisp+Int((boundsMaxY-dirtyRect.minY)/cellHeight)
-        #endif
-
-        for row in firstRow...lastRow {
-            if row < 0 {
-                continue
-            }
-            if row >= terminal.buffer.lines.count {
-                continue
-            }
-            let renderMode = terminal.buffer.lines [row].renderMode
-            let lineOffset = calcLineOffset(forRow: row)
-            let lineOrigin = CGPoint(x: 0, y: frame.height - lineOffset)
-            
-            switch renderMode {
-            case .single:
-                break
-            case .doubledDown:
-                context.saveGState()
-                let pivot = lineOrigin.y
-                let lineRect = CGRect (origin: CGPoint (x: 0, y: lineOrigin.y), size: CGSize (width: dirtyRect.width, height: cellDimension.height))
-                context.clip(to: [lineRect])
-                // Debug aid
-                //  context.setFillColor(CGColor(red: 0, green: Double (row)/25.0, blue: 0, alpha: 1))
-                // context.fill([lineRect])
-
-                context.translateBy(x: 0, y: pivot)
-                context.scaleBy (x: 2, y: 2)
-                context.translateBy(x: 0, y: -pivot)
-
-            case .doubledTop:
-                context.saveGState()
-                let pivot = lineOrigin.y + cellDimension.height
-                let lineRect = CGRect (origin: CGPoint (x: 0, y: lineOrigin.y), size: CGSize (width: dirtyRect.width, height: cellDimension.height))
-
-                context.clip(to: [lineRect])
-                
-                // Debug Aid
-                //context.setFillColor(CGColor(red: Double (row)/25.0, green: 0, blue: 0, alpha: 1))
-                //context.fill([lineRect])
-
-                context.translateBy(x: 0, y: pivot)
-                context.scaleBy (x: 2, y: 2)
-                context.translateBy(x: 0, y: -pivot)
-                
-            case .doubleWidth:
-                context.saveGState()
-                context.scaleBy (x: 2, y: 1)
-            }
-            #if false
-            // This optimization is useful, but only if we can get proper exposed regions
-            // and while it works most of the time with the BigSur change, there is still
-            // a case where we just get full exposes despite requesting only a line
-            // repro: fill 300 lines, then clear screen then repeatedly output commands
-            // that produce 3-5 lines of text: while we send AppKit the right boundary,
-            // AppKit still send everything.  
-            let lineRect = CGRect (origin: lineOrigin, size: CGSize (width: dirtyRect.width, height: cellDimension.height))
-            
-            if !lineRect.intersects(dirtyRect) {
-                //print ("Skipping row \(row) because it does nto intersect")
-                continue
-            } 
-            #endif
-            let line = terminal.buffer.lines [row]
-            let lineInfo = buildAttributedString(row: row, line: line, cols: terminal.cols)
-
-            for segment in lineInfo.segments {
-                guard segment.attributedString.length > 0 else {
-                    continue
-                }
-                
-                let ctline = CTLineCreateWithAttributedString(segment.attributedString)
-                guard let runs = CTLineGetGlyphRuns(ctline) as? [CTRun] else {
-                    continue
-                }
-                var processedGlyphs = 0
-                for run in runs {
-                    let runGlyphsCount = CTRunGetGlyphCount(run)
-                    if runGlyphsCount == 0 {
-                        continue
-                    }
-                    let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
-                    var runFont = runAttributes[.font] as! TTFont
-                    let startColumn = segment.column + (processedGlyphs * segment.columnWidth)
-                    let endColumn = startColumn + (runGlyphsCount * segment.columnWidth)
-                    if row == 0 {
-                        // print(run)
+        return print(run)
                     }
                     var backgroundColor: TTColor?
                     if runAttributes.keys.contains(.selectionBackgroundColor) {
@@ -996,14 +798,15 @@ extension TerminalView {
         // a) number of cells * average width of a cell
         // b) actual string length computed with NSAttributedString().width
         // The latter is too much for emojis, the former is too much for CJK characters. 
-        // var stringLength = cellDimension.width * doublePosition * CGFloat(buffer.x) 
-        var stringLength = computeStringLength(line: buffer.y+(buffer.yBase), upto: buffer.x)
+        var stringLength = cellDimension.width * doublePosition * CGFloat(buffer.x)
+        // is that slowing down the process? Nope, something else?
+        // var stringLength = computeStringLength(line: buffer.y+(buffer.yBase), upto: buffer.x)
         caretView.frame.origin = CGPoint(x: lineOrigin.x + stringLength, y: lineOrigin.y)
         caretView.setText (ch: buffer.lines [vy][buffer.x])
     }
     
     // Does not use a default argument and merge, because it is called back
-    func updateDisplay ()
+    public func updateDisplay ()
     {
         updateDisplay (notifyAccessibility: true)
         updateDebugDisplay()
@@ -1451,6 +1254,39 @@ extension TerminalView {
         return result
     }
 
+    public func getLastPrompt() -> String {
+        if promptline < 0 {
+            return ""
+        }
+        if promptline >= terminal.buffer.lines.count {
+            return ""
+        }
+        var result = ""
+        var r = promptline
+        while (r >= 0) && (result.count < 50) {
+            let line =  terminal.buffer.lines [r]
+            var end = line.count - 1 
+            if (r == promptline) {
+                end = promptcolumn - 1
+            }
+            r -= 1
+            if (end < 0) { 
+                continue
+            }
+            for i in (0...end).reversed() {
+                if line[i].code == 0 {
+                    if i > 0 && line[i-1].code == 0 {
+                        return result
+                    } else {
+                        continue
+                    }
+                }
+                result = String(line[i].getCharacter()) + result
+            }
+        }
+        return result
+    }
+
     func computeStringLength(line: Int, upto: Int) -> CGFloat {
         let line = terminal.buffer.lines[line]
         var result = 0.0
@@ -1472,6 +1308,18 @@ extension TerminalView {
         promptcolumn = terminal.buffer.x
     }
 
+    public func saveCursorPosition() {
+        savedCursorLine = terminal.buffer.yBase + terminal.buffer.y
+        savedCursorColumn = terminal.buffer.x
+        print("saving cursor position to \(terminal.buffer.y), \(terminal.buffer.x)")
+    }
+
+    public func restoreCursorPosition() {
+        terminal.buffer.x = savedCursorColumn
+        terminal.buffer.y = savedCursorLine - terminal.buffer.yBase
+        print("restored cursor position to \(terminal.buffer.y), \(terminal.buffer.x)")
+    }
+
     public func getCurrentChar() -> String {
         let currentLine = terminal.buffer.yBase + terminal.buffer.y
         // 0-code char after a two-char-length emoji: get the previous one
@@ -1484,15 +1332,30 @@ extension TerminalView {
         return String(terminal.buffer.lines[currentLine][terminal.buffer.x - 1].getCharacter())
     }
 
-    public func canMoveLeft() -> Bool {
+    public func moveUpIfNeeded() {
+        // If the user has pressed a left arrow, and we're at the beginning of the line, 
+        // move to the end of the next line if we need to.
        let currentLine = terminal.buffer.yBase + terminal.buffer.y
-       if (currentLine > promptline) {
-           return true
+       if (currentLine <= promptline) {
+           return 
        }
-       if (terminal.buffer.x > promptcolumn) {
-           return true
+       if (terminal.buffer.x == 0) {
+           terminal.buffer.y -= 1
+           terminal.buffer.x = terminal.buffer.lines [currentLine].count
        }
-       return false
+    }
+
+    public func moveDownIfNeeded() {
+        // If the user has pressed a left arrow, and we're at the beginning of the line, 
+        // move to the end of the next line if we need to.
+       let currentLine = terminal.buffer.yBase + terminal.buffer.y
+       if (currentLine >= terminal.buffer.lines.count) {
+           return 
+       }
+       if (terminal.buffer.x == terminal.buffer.lines [currentLine].count - 1) {
+           terminal.buffer.y += 1
+           terminal.buffer.x = 0
+       }
     }
 
     public func atTheEndOfTheLine() -> Bool {
@@ -1500,29 +1363,9 @@ extension TerminalView {
         // and SwiftTerm doesn't return to the next line. 
         let currentLine = terminal.buffer.yBase + terminal.buffer.y
         let line =  terminal.buffer.lines [currentLine]
-        print("x: \(terminal.buffer.x) y: \(terminal.buffer.y) wraparound: \(terminal.wraparound)")
         return  (terminal.buffer.x == 0) && (line[line.count-1].code != 0)
     }
     
-    public func canMoveRight() -> Bool {
-        let currentLine = terminal.buffer.yBase + terminal.buffer.y
-        let line =  terminal.buffer.lines [currentLine]
-        // If we're at the end of the line, result depends on whether another line exists:
-        if (terminal.buffer.x >= terminal.buffer.lines [currentLine].count - 1) {
-            if (terminal.buffer.lines.count > currentLine) {
-                return true
-            }
-            return false
-        }
-        if (line[terminal.buffer.x].code != 0) { 
-            return true
-        }
-        if (terminal.buffer.x > 0) && line[terminal.buffer.x - 1].getCharacter().utf8.count > 1 {
-            return true
-        }
-        return false
-    }
-
     // used for history
     public func moveToBeginningOfLine() {
         // back to the cursor position: 
