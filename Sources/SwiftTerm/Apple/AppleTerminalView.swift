@@ -57,7 +57,6 @@ var savedCursorLine = 0
 var savedCursorColumn = 0
 
 extension TerminalView {
-
     typealias CellDimension = CGSize
     
     func resetCaches ()
@@ -535,7 +534,254 @@ extension TerminalView {
             segments.append(finished)
         }
         
-        return print(run)
+        return ViewLineInfo(segments: segments, images: line.images)
+    }
+    
+    /// Returns the selection range for the specified row, if any.
+    func selectedColumnsRange(row: Int, cols: Int) -> Range<Int>? {
+        guard let selection = self.selection, selection.active else {
+            return nil
+        }
+
+        let startRow = selection.start.row
+        let endRow = selection.end.row
+        let startCol = selection.start.col
+        let endCol = selection.end.col
+
+        var selectionRange: NSRange = .empty
+
+        // single row
+        if endRow == startRow && startRow == row {
+            if startCol < endCol {
+                let extra = endCol == terminal.cols-1 ? 1 : 0
+                selectionRange = NSRange(location: startCol, length: endCol - startCol + extra)
+            } else if startCol > endCol {
+                selectionRange = NSRange(location: endCol, length: startCol - endCol)
+            }
+        } else if endRow > startRow {
+            // first row
+            if startRow == row && endRow > row {
+                selectionRange = NSRange(location: startCol, length: cols - startCol)
+            }
+
+            // in between
+            if startRow < row && endRow > row {
+                selectionRange = NSRange(location: 0, length: cols)
+            }
+
+            // last row
+            if startRow < row && endRow == row {
+                let extra = endCol == terminal.cols-1 ? 1 : 0
+                selectionRange = NSRange(location: 0, length: endCol + extra)
+            }
+        } else if endRow < startRow {
+            // first row
+            if endRow == row && startRow > row {
+                selectionRange = NSRange(location: endCol, length: cols - endCol)
+            }
+
+            // in between
+            if startRow > row && endRow < row {
+                selectionRange = NSRange(location: 0, length: cols)
+            }
+
+            // last row
+            if endRow < row && startRow == row {
+                let extra = startCol == terminal.cols-1 ? 1 : 0
+                selectionRange = NSRange(location: 0, length: startCol + extra)
+            }
+        }
+
+        if selectionRange == .empty || selectionRange.length == 0 {
+            return nil
+        }
+
+        let lowerBound = max(0, min(selectionRange.location, cols))
+        let upperBound = max(lowerBound, min(cols, selectionRange.location + selectionRange.length))
+        if lowerBound == upperBound {
+            return nil
+        }
+        return lowerBound..<upperBound
+    }
+    
+    func isColumnSelected(_ selectionRange: Range<Int>?, column: Int, width: Int) -> Bool {
+        guard let selectionRange else {
+            return false
+        }
+        let endColumn = column + width
+        return selectionRange.lowerBound < endColumn && column < selectionRange.upperBound
+    }
+
+    func drawRunAttributes(_ attributes: [NSAttributedString.Key : Any], glyphPositions positions: [CGPoint], in currentContext: CGContext) {
+        currentContext.saveGState()
+
+        let scale = backingScaleFactor()
+
+        if attributes.keys.contains(.underlineStyle) {
+            // draw underline at font.normal.underlinePosition baseline
+            let underlineStyle = NSUnderlineStyle(rawValue: attributes[.underlineStyle] as? NSUnderlineStyle.RawValue ?? 0)
+            let underlineColor = attributes[.underlineColor] as? TTColor ?? nativeForegroundColor
+            let underlinePosition = fontSet.underlinePosition ()
+
+            // draw line at the baseline
+            currentContext.setShouldAntialias(false)
+            currentContext.setStrokeColor(underlineColor.cgColor)
+
+            let underlineThickness = max(round(scale * fontSet.underlineThickness ()) / scale, 0.5)
+            for p in positions {
+                switch underlineStyle {
+                case let style where style.contains(.single):
+                    let path = TTBezierPath()
+                    path.move(to: p.applying(.init(translationX: 0, y: underlinePosition)))
+                    path.addLine(to: p.applying(.init(translationX: ceil(cellDimension.width), y: underlinePosition)))
+                    path.lineWidth = underlineThickness
+                    switch underlineStyle {
+                    case let pattern where pattern.contains(.patternDash):
+                        let pattern: [CGFloat] = [2.0]
+                        path.setLineDash(pattern, count: pattern.count, phase: 0)
+                    default:
+                        break
+                    }
+                    path.stroke()
+                case let style where style.contains(.double):
+                    let path1 = TTBezierPath()
+                    path1.move(to: p.applying(.init(translationX: 0, y: underlinePosition)))
+                    path1.addLine(to: p.applying(.init(translationX: ceil(cellDimension.width), y: underlinePosition)))
+                    path1.lineWidth = underlineThickness
+
+                    let path2 = TTBezierPath()
+                    path2.move(to: p.applying(.init(translationX: 0, y: underlinePosition - underlineThickness - 1)))
+                    path2.addLine(to: p.applying(.init(translationX: ceil(cellDimension.width), y: underlinePosition - underlineThickness - 1)))
+                    path2.lineWidth = underlineThickness
+
+                    switch underlineStyle {
+                    case let pattern where pattern.contains(.patternDash):
+                        let pattern: [CGFloat] = [2.0]
+                        path1.setLineDash(pattern, count: pattern.count, phase: 0)
+                        path2.setLineDash(pattern, count: pattern.count, phase: 0)
+                    default:
+                        break
+                    }
+                    path1.stroke()
+                    path2.stroke()
+                default:
+                    preconditionFailure("Unsupported underline style.")
+                    break
+                }
+            }
+        }
+        currentContext.restoreGState()
+    }
+
+    
+    // TODO: this should not render any lines outside the dirtyRect
+    func drawTerminalContents (dirtyRect: TTRect, context: CGContext, bufferOffset: Int)
+    {
+        let lineDescent = CTFontGetDescent(fontSet.normal)
+        let lineLeading = CTFontGetLeading(fontSet.normal)
+        let yOffset = ceil(lineDescent+lineLeading)
+
+        func calcLineOffset (forRow: Int) -> CGFloat {
+            cellDimension.height * CGFloat (forRow-bufferOffset+1)
+        }
+        // draw lines
+        #if os(iOS) || os(visionOS)
+        // On iOS, we are drawing the exposed region
+        let cellHeight = cellDimension.height
+        let firstRow = Int (dirtyRect.minY/cellHeight)
+        let lastRow = Int(dirtyRect.maxY/cellHeight)
+        #else
+        // On Mac, we are drawing the terminal buffer
+        let cellHeight = cellDimension.height
+        let boundsMaxY = bounds.maxY
+        let firstRow = terminal.buffer.yDisp+Int ((boundsMaxY-dirtyRect.maxY)/cellHeight)
+        let lastRow = terminal.buffer.yDisp+Int((boundsMaxY-dirtyRect.minY)/cellHeight)
+        #endif
+
+        for row in firstRow...lastRow {
+            if row < 0 {
+                continue
+            }
+            if row >= terminal.buffer.lines.count {
+                continue
+            }
+            let renderMode = terminal.buffer.lines [row].renderMode
+            let lineOffset = calcLineOffset(forRow: row)
+            let lineOrigin = CGPoint(x: 0, y: frame.height - lineOffset)
+            
+            switch renderMode {
+            case .single:
+                break
+            case .doubledDown:
+                context.saveGState()
+                let pivot = lineOrigin.y
+                let lineRect = CGRect (origin: CGPoint (x: 0, y: lineOrigin.y), size: CGSize (width: dirtyRect.width, height: cellDimension.height))
+                context.clip(to: [lineRect])
+                // Debug aid
+                //  context.setFillColor(CGColor(red: 0, green: Double (row)/25.0, blue: 0, alpha: 1))
+                // context.fill([lineRect])
+
+                context.translateBy(x: 0, y: pivot)
+                context.scaleBy (x: 2, y: 2)
+                context.translateBy(x: 0, y: -pivot)
+
+            case .doubledTop:
+                context.saveGState()
+                let pivot = lineOrigin.y + cellDimension.height
+                let lineRect = CGRect (origin: CGPoint (x: 0, y: lineOrigin.y), size: CGSize (width: dirtyRect.width, height: cellDimension.height))
+
+                context.clip(to: [lineRect])
+                
+                // Debug Aid
+                //context.setFillColor(CGColor(red: Double (row)/25.0, green: 0, blue: 0, alpha: 1))
+                //context.fill([lineRect])
+
+                context.translateBy(x: 0, y: pivot)
+                context.scaleBy (x: 2, y: 2)
+                context.translateBy(x: 0, y: -pivot)
+                
+            case .doubleWidth:
+                context.saveGState()
+                context.scaleBy (x: 2, y: 1)
+            }
+            #if false
+            // This optimization is useful, but only if we can get proper exposed regions
+            // and while it works most of the time with the BigSur change, there is still
+            // a case where we just get full exposes despite requesting only a line
+            // repro: fill 300 lines, then clear screen then repeatedly output commands
+            // that produce 3-5 lines of text: while we send AppKit the right boundary,
+            // AppKit still send everything.  
+            let lineRect = CGRect (origin: lineOrigin, size: CGSize (width: dirtyRect.width, height: cellDimension.height))
+            
+            if !lineRect.intersects(dirtyRect) {
+                //print ("Skipping row \(row) because it does nto intersect")
+                continue
+            } 
+            #endif
+            let line = terminal.buffer.lines [row]
+            let lineInfo = buildAttributedString(row: row, line: line, cols: terminal.cols)
+
+            for segment in lineInfo.segments {
+                guard segment.attributedString.length > 0 else {
+                    continue
+                }
+                
+                let ctline = CTLineCreateWithAttributedString(segment.attributedString)
+                guard let runs = CTLineGetGlyphRuns(ctline) as? [CTRun] else {
+                    continue
+                }
+                var processedGlyphs = 0
+                for run in runs {
+                    let runGlyphsCount = CTRunGetGlyphCount(run)
+                    if runGlyphsCount == 0 {
+                        continue
+                    }
+                    let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
+                    let runFont = runAttributes[.font] as! TTFont
+                    let startColumn = segment.column + (processedGlyphs * segment.columnWidth)
+                    let endColumn = startColumn + (runGlyphsCount * segment.columnWidth)
+                    if row == 0 {
+                        // print(run)
                     }
                     var backgroundColor: TTColor?
                     if runAttributes.keys.contains(.selectionBackgroundColor) {
@@ -587,7 +833,7 @@ extension TerminalView {
                         CTRunGetGlyphs(run, CFRange(), bufferPointer.baseAddress!)
                         count = runGlyphsCount
                     }
-
+                    
                     var coreTextPositions = [CGPoint](repeating: .zero, count: runGlyphsCount)
                     CTRunGetPositions(run, CFRange(), &coreTextPositions)
                     
@@ -772,7 +1018,7 @@ extension TerminalView {
         }
     }
     
-    public func updateCursorPosition()
+    func updateCursorPosition()
     {
         guard let caretView else { return }
         //let lineOrigin = CGPoint(x: 0, y: frame.height - (cellDimension.height * (CGFloat(terminal.buffer.y - terminal.buffer.yDisp + 1))))

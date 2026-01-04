@@ -1121,7 +1121,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         
         queuePendingDisplay()
     }
-
+    
     func ensureCaretIsVisible ()
     {
         contentOffset = CGPoint (x: 0, y: CGFloat (terminal.buffer.lines.count-terminal.rows)*cellDimension.height)
