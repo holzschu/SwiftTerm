@@ -42,6 +42,9 @@ internal var log: Logger = Logger(subsystem: "org.tirania.SwiftTerm", category: 
  * defaults, otherwise, this uses its own set of defaults colors.
  */
 open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollViewDelegate, TerminalDelegate {
+    public static var textInputDebugEnabled: Bool = false
+    internal static var textInputLogCounter: Int = 0
+
     struct FontSet {
         public let normal: UIFont
         let bold: UIFont
@@ -1084,14 +1087,18 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     public var hasText: Bool {
-        return true
+        return !textInputStorage.isEmpty
     }
 
     /*
         Soft keyboard input. Hardware keyboard text input is delivered here; special keys are handled in pressesBegan.
     */
     open func insertText(_ text: String) {
-        uitiLog("insertText(\"\(text)\") textInputStorage:\"\(textInputStorage)\"")
+        //uitiLog("insertText(\(text.debugDescription)) \(textInputStateDescription())")
+
+        if tryComposeKoreanFinal(text) {
+            return
+        }
 
         beginTextInputEdit()
 
@@ -1103,7 +1110,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         _selectedTextRange = TextRange(from: insertedPosition, to: insertedPosition)
 
         endTextInputEdit()
-        
+
         if terminalAccessory?.controlModifier ?? false {
             self.send(applyControlToEventCharacters(text))
             terminalAccessory?.controlModifier = false
@@ -1112,27 +1119,84 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 resetInputBuffer()
                 self.send(data: returnByteSequence [0...])
             } else {
-                // resetInputBuffer is *required* for Korean keyboards
-                // it causes a crash with Japanese keyboards.
-                if let keyboardLanguage = self.textInputMode?.primaryLanguage {
-                    if (keyboardLanguage.hasPrefix("ko")) {
-                        resetInputBuffer() 
-                    }
-                }
                 self.send(txt: text)
             }
         }
         
         queuePendingDisplay()
     }
-    
+
+    // this is necessary because something in the iOS IME seems to prevent
+    // the sequence  "ㅇ", "ㅜ", "ㅇ" from becoming "웅", and instead
+    // it becomes "우" followed by "ㅇ"
+    private func tryComposeKoreanFinal(_ text: String) -> Bool {
+        guard let language = textInputMode?.primaryLanguage, language.hasPrefix("ko") else { return false }
+        guard _markedTextRange == nil else { return false }
+        guard _selectedTextRange.isEmpty, _selectedTextRange.endPosition.offset == textInputStorage.count else { return false }
+        guard text.count == 1, let jamo = text.first else { return false }
+        guard let finalIndex = koreanFinalIndex[jamo] else { return false }
+        guard let lastChar = textInputStorage.last else { return false }
+        guard let composed = composeHangulSyllable(base: lastChar, finalIndex: finalIndex) else { return false }
+
+        uitiLog("koreanComposeFinal base:\(lastChar) jamo:\(jamo) -> \(composed)")
+
+        beginTextInputEdit()
+        textInputStorage.removeLast()
+        textInputStorage.append(composed)
+        let newOffset = textInputStorage.count
+        _markedTextRange = nil
+        _selectedTextRange = TextRange(from: TextPosition(offset: newOffset), to: TextPosition(offset: newOffset))
+        endTextInputEdit()
+
+        send([backspaceSendsControlH ? 8 : 0x7f])
+        send(txt: String(composed))
+        queuePendingDisplay()
+        return true
+    }
+
+    private let koreanFinalIndex: [Character: Int] = [
+        "ㄱ": 1, "ㄲ": 2, "ㄳ": 3,
+        "ㄴ": 4, "ㄵ": 5, "ㄶ": 6,
+        "ㄷ": 7,
+        "ㄹ": 8, "ㄺ": 9, "ㄻ": 10, "ㄼ": 11, "ㄽ": 12, "ㄾ": 13, "ㄿ": 14, "ㅀ": 15,
+        "ㅁ": 16,
+        "ㅂ": 17, "ㅄ": 18,
+        "ㅅ": 19, "ㅆ": 20,
+        "ㅇ": 21,
+        "ㅈ": 22,
+        "ㅊ": 23,
+        "ㅋ": 24,
+        "ㅌ": 25,
+        "ㅍ": 26,
+        "ㅎ": 27
+    ]
+
+    private func composeHangulSyllable(base: Character, finalIndex: Int) -> Character? {
+        guard finalIndex > 0 && finalIndex < 28 else { return nil }
+        guard let scalar = base.unicodeScalars.first, base.unicodeScalars.count == 1 else { return nil }
+        let scalarValue = Int(scalar.value)
+        let sBase = 0xAC00
+        let sEnd = 0xD7A3
+        guard scalarValue >= sBase && scalarValue <= sEnd else { return nil }
+        let vCount = 21
+        let tCount = 28
+        let sIndex = scalarValue - sBase
+        let lIndex = sIndex / (vCount * tCount)
+        let vIndex = (sIndex % (vCount * tCount)) / tCount
+        let tIndex = sIndex % tCount
+        guard tIndex == 0 else { return nil }
+        let newScalarValue = sBase + (lIndex * vCount + vIndex) * tCount + finalIndex
+        guard let newScalar = UnicodeScalar(newScalarValue) else { return nil }
+        return Character(newScalar)
+    }
+
     func ensureCaretIsVisible ()
     {
         contentOffset = CGPoint (x: 0, y: CGFloat (terminal.buffer.lines.count-terminal.rows)*cellDimension.height)
     }
     
     public func deleteBackward() {
-        uitiLog("deleteBackward() textInputStorage:\"\(textInputStorage)\" markedTextRange:\"\(_markedTextRange)\" selectedTextRange:\"\(_selectedTextRange)\"")
+        uitiLog("deleteBackward() \(textInputStateDescription())")
 
         // after backward deletion, marked range is always cleared, and length of selected range is always zero
         let rangeToDelete = _markedTextRange ?? _selectedTextRange
@@ -1224,13 +1288,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     public override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         var didHandleEvent = false
-        
+
         if _markedTextRange != nil {
             super.pressesBegan(presses, with: event)
             return
         }
+        
         for press in presses {
             guard let key = press.key else { continue }
+            uitiLog("pressesBegan keyCode:\(key.keyCode) chars:\(key.characters.debugDescription) ignoring:\(key.charactersIgnoringModifiers.debugDescription) modifiers:\(key.modifierFlags)")
                 
             var data: SendData? = nil
 

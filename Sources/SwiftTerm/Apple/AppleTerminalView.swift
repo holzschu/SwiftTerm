@@ -780,9 +780,6 @@ extension TerminalView {
                     let runFont = runAttributes[.font] as! TTFont
                     let startColumn = segment.column + (processedGlyphs * segment.columnWidth)
                     let endColumn = startColumn + (runGlyphsCount * segment.columnWidth)
-                    if row == 0 {
-                        // print(run)
-                    }
                     var backgroundColor: TTColor?
                     if runAttributes.keys.contains(.selectionBackgroundColor) {
                         backgroundColor = runAttributes[.selectionBackgroundColor] as? TTColor
@@ -1158,7 +1155,6 @@ extension TerminalView {
         let oldPosition = terminal.buffer.yDisp
         
         let maxScrollback = terminal.buffer.lines.count - terminal.rows
-        print ("maxScrollBack: \(maxScrollback)")
         var newScrollPosition = Int (Double (maxScrollback) * toPosition)
         
         if newScrollPosition < 0 {
@@ -1167,8 +1163,7 @@ extension TerminalView {
         if newScrollPosition > maxScrollback {
             newScrollPosition = maxScrollback
         }
-        print ("newScrollpsitin: \(newScrollPosition)")
-        
+
         if newScrollPosition != oldPosition {
             scrollTo(row: newScrollPosition)
         }
@@ -1273,6 +1268,13 @@ extension TerminalView {
     public func send(data: ArraySlice<UInt8>)
     {
         ensureCaretIsVisible ()
+        #if os(iOS) || os(visionOS)
+        if TerminalView.textInputDebugEnabled {
+            let previewBytes = data.prefix(32).map { String(format: "%02X", $0) }.joined(separator: " ")
+            print("UITextInput[\(TerminalView.textInputLogCounter + 1)]: send bytes=\(data.count) [\(previewBytes)]")
+            TerminalView.textInputLogCounter += 1
+        }
+        #endif
         terminalDelegate?.send (source: self, data: data)
     }
     
@@ -1281,6 +1283,12 @@ extension TerminalView {
      * - Parameter txt: the string to send to the client
      */
     public func send (txt: String) {
+        #if os(iOS) || os(visionOS)
+        if TerminalView.textInputDebugEnabled {
+            print("UITextInput[\(TerminalView.textInputLogCounter + 1)]: send txt=\(txt.debugDescription)")
+            TerminalView.textInputLogCounter += 1
+        }
+        #endif
         let array = [UInt8] (txt.utf8)
         send (data: array[...])
     }
