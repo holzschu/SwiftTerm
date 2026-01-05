@@ -1040,13 +1040,7 @@ extension TerminalView {
         let offset = (cellDimension.height * (CGFloat(buffer.y-(buffer.yDisp-buffer.yBase)+1)))
         let lineOrigin = CGPoint(x: 0, y: frame.height - offset)
         #endif
-        // We have two different ways to compute the position: 
-        // a) number of cells * average width of a cell
-        // b) actual string length computed with NSAttributedString().width
-        // The latter is too much for emojis, the former is too much for CJK characters. 
         var stringLength = cellDimension.width * doublePosition * CGFloat(buffer.x)
-        // is that slowing down the process? Nope, something else?
-        // var stringLength = computeStringLength(line: buffer.y+(buffer.yBase), upto: buffer.x)
         caretView.frame.origin = CGPoint(x: lineOrigin.x + stringLength, y: lineOrigin.y)
         caretView.setText (ch: buffer.lines [vy][buffer.x])
     }
@@ -1532,20 +1526,6 @@ extension TerminalView {
         }
         return result
     }
-
-    func computeStringLength(line: Int, upto: Int) -> CGFloat {
-        let line = terminal.buffer.lines[line]
-        var result = 0.0
-        for i in 0..<upto {
-            if line[i].code == 0 {
-                continue
-            }
-            // cursor moves: at most 2x cell width, at most the actual width of the string
-            result += min(NSAttributedString(string: String(line[i].getCharacter()), attributes: [.font: font]).size().width, 2.0 * self.cellDimension.width)
-        }
-        return result
-    }
-
 
     public func setPromptEnd() {
         guard let caretView else { return }

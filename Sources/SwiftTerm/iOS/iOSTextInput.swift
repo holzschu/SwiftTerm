@@ -69,6 +69,16 @@ extension TerminalView: UITextInput {
         uitiLog ("TRACE: \(function)")
     }
 
+    func beginTextInputEdit() {
+        inputDelegate?.selectionWillChange(self)
+        inputDelegate?.textWillChange(self)
+    }
+
+    func endTextInputEdit() {
+        inputDelegate?.textDidChange(self)
+        inputDelegate?.selectionDidChange(self)
+    }
+    
     public func text(in range: UITextRange) -> String? {
         guard let r = range as? TextRange else { return nil }
 
@@ -85,6 +95,8 @@ extension TerminalView: UITextInput {
         guard _markedTextRange == nil else { return }
         uitiLog ("replace(range:\(r), withText:\"\(text)\") inputTextStorage:\"\(textInputStorage)\" markedTextRange:\(_markedTextRange?.description ?? "nil") selectedTextRange:\(_selectedTextRange.description)")
 
+        beginTextInputEdit()
+        
         // Send the edits to the terminal
         // Delete the old by sending as many backspaces as needed
         let oldText = textInputStorage [r.fullRange(in: textInputStorage)]
@@ -108,6 +120,8 @@ extension TerminalView: UITextInput {
             let insertionEndPosition = TextPosition(offset:insertionIndex + text.count)            
             _selectedTextRange = TextRange(from: insertionEndPosition,  to: insertionEndPosition)
         }
+        
+        endTextInputEdit()
     }
 
     /*
@@ -156,6 +170,8 @@ extension TerminalView: UITextInput {
         let rangeToReplace = _markedTextRange ?? _selectedTextRange
         let rangeStartPosition = rangeToReplace.startPosition
 
+        beginTextInputEdit()
+        
         if let newText = markedText {
             textInputStorage.replaceSubrange(rangeToReplace.fullRange(in: textInputStorage), with: newText)
             // Figure out the new selection range
@@ -172,17 +188,19 @@ extension TerminalView: UITextInput {
             textInputStorage.removeSubrange(rangeToReplace.fullRange(in: textInputStorage))
             _markedTextRange = nil
             _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
-        }        
+        } 
+
+        endTextInputEdit()
     }
 
     func resetInputBuffer (_ loc: String = #function)
     {
         uitiLog("resetInputBuffer()")
-        inputDelegate?.selectionWillChange(self)
+        beginTextInputEdit()
         textInputStorage = ""
         _selectedTextRange = TextRange (from: TextPosition(offset: 0), to: TextPosition(offset: 0))
         _markedTextRange = nil
-        inputDelegate?.selectionDidChange(self)
+        endTextInputEdit()
     }
     
     public func unmarkText() {
@@ -192,12 +210,14 @@ extension TerminalView: UITextInput {
             if let previouslyMarkedText = text(in: previouslyMarkedRange) {
                 if previouslyMarkedText.count > 0 {
                     insertText(previouslyMarkedText)
+                    return
                 }
             }
-            //
+            beginTextInputEdit()
             let rangeEndPosition = previouslyMarkedRange.endPosition
             _selectedTextRange = TextRange(from: rangeEndPosition, to: rangeEndPosition)
             _markedTextRange = nil
+            endTextInputEdit()
         }        
     }
     

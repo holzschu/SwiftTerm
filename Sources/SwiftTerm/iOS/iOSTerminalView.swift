@@ -1088,10 +1088,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
 
     /*
-        Soft keyboard input. Hardware keyboard input is handled in pressesBegan.
+        Soft keyboard input. Hardware keyboard text input is delivered here; special keys are handled in pressesBegan.
     */
     open func insertText(_ text: String) {
         uitiLog("insertText(\"\(text)\") textInputStorage:\"\(textInputStorage)\"")
+
+        beginTextInputEdit()
 
         let rangeToReplace = _markedTextRange ?? _selectedTextRange
         let rangeStartIndex = rangeToReplace.startPosition.offset
@@ -1100,6 +1102,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         let insertedPosition = TextPosition(offset: rangeStartIndex + text.count)
         _selectedTextRange = TextRange(from: insertedPosition, to: insertedPosition)
 
+        endTextInputEdit()
+        
         if terminalAccessory?.controlModifier ?? false {
             self.send(applyControlToEventCharacters(text))
             terminalAccessory?.controlModifier = false
@@ -1108,10 +1112,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 resetInputBuffer()
                 self.send(data: returnByteSequence [0...])
             } else {
-                // resetInputBuffer is *required* for Tiếng Việt Telex and Korean keyboards
+                // resetInputBuffer is *required* for Korean keyboards
                 // it causes a crash with Japanese keyboards.
                 if let keyboardLanguage = self.textInputMode?.primaryLanguage {
-                    if (keyboardLanguage.hasPrefix("vi") || keyboardLanguage.hasPrefix("ko")) {
+                    if (keyboardLanguage.hasPrefix("ko")) {
                         resetInputBuffer() 
                     }
                 }
@@ -1129,7 +1133,6 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     public func deleteBackward() {
         uitiLog("deleteBackward() textInputStorage:\"\(textInputStorage)\" markedTextRange:\"\(_markedTextRange)\" selectedTextRange:\"\(_selectedTextRange)\"")
-        inputDelegate?.selectionWillChange(self)
 
         // after backward deletion, marked range is always cleared, and length of selected range is always zero
         let rangeToDelete = _markedTextRange ?? _selectedTextRange
@@ -1147,12 +1150,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 return
             }
 
+            beginTextInputEdit()
+
             rangeStartIndex -= 1
             textInputStorage.remove(at: textInputStorage.index(textInputStorage.startIndex, offsetBy: rangeStartIndex))
             rangeStartPosition = TextPosition(offset: rangeStartIndex)
 
             self.send ([backspaceSendsControlH ? 8 : 0x7f])
         } else {
+            beginTextInputEdit()
             // Send as many backspaces that are in the range to delete. When on auto-repeat, after a some time
             // pressing the backspace, it will delete chunks of text at a time.
             let oldText = textInputStorage[rangeToDelete.fullRange(in: textInputStorage)]
@@ -1167,7 +1173,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         _markedTextRange = nil
         _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
 
-        inputDelegate?.selectionDidChange(self)
+        endTextInputEdit()
     }
 
     enum SendData {
@@ -1219,6 +1225,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     public override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         var didHandleEvent = false
         
+        if _markedTextRange != nil {
+            super.pressesBegan(presses, with: event)
+            return
+        }
         for press in presses {
             guard let key = press.key else { continue }
                 
@@ -1288,18 +1298,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             case .keyboardDeleteForward:
                 data = .bytes (EscapeSequences.cmdDelKey)
                 
-            case .keyboardDeleteOrBackspace:
-                data = .bytes ([backspaceSendsControlH ? 8 : 0x7f])
-                
             case .keyboardEscape:
                 data = .bytes ([0x1b])
                 
             case .keyboardInsert:
                 print (".keyboardInsert ignored")
                 break
-                
-            case .keyboardReturn:
-                data = .bytes (returnByteSequence)
                 
             case .keyboardTab:
                 data = .bytes ([9])
@@ -1338,17 +1342,6 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                     optionAsMetaKey.toggle()
                 } else if key.modifierFlags.contains (.alternate) && optionAsMetaKey {
                     data = .text("\u{1b}\(key.charactersIgnoringModifiers)")
-                } else if !key.modifierFlags.contains (.command){
-                    if let keyboardLanguage = self.textInputMode?.primaryLanguage {
-                        // Is the keyboard language one of the multi-input languages? Chinese, Japanese, Korean and Hindi-Transliteration
-                        // If so, do not process the input yet (we'll do it later in unmarkText())
-                        if (!keyboardLanguage.hasPrefix("hi") && !keyboardLanguage.hasPrefix("zh") &&
-                            !keyboardLanguage.hasPrefix("ja") && !keyboardLanguage.hasPrefix("ko") && !keyboardLanguage.hasPrefix("vi")) {
-                            if key.characters.count > 0 {
-                                data = .text (key.characters)
-                            }
-                        }
-                    }
                 }
             }
             if let sendableData = data {
