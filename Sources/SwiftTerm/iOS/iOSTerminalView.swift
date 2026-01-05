@@ -43,7 +43,7 @@ internal var log: Logger = Logger(subsystem: "org.tirania.SwiftTerm", category: 
  */
 open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollViewDelegate, TerminalDelegate {
     public static var textInputDebugEnabled: Bool = false
-    internal static var textInputLogCounter: Int = 0
+    public static var textInputLogCounter: Int = 0
 
     struct FontSet {
         public let normal: UIFont
