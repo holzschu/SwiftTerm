@@ -504,6 +504,7 @@ extension TerminalView {
         }
         
         mutating func append(text: String, attributes: [NSAttributedString.Key: Any]) {
+#if false
             // We need characters to occupy an integer number of columns, otherwise
             // cursor position and arrow displacement will be off. Same with text
             // insertion when switching from one language to another.
@@ -547,6 +548,7 @@ extension TerminalView {
                     }
                 }
             }
+#endif
             // "Standard" characters are added directly:
             attributedString.append(NSAttributedString(string: text, attributes: attributes))
             characterCount += 1
@@ -1007,8 +1009,13 @@ extension TerminalView {
                     var positions = [CGPoint](repeating: .zero, count: runGlyphsCount)
                     for i in 0..<runGlyphsCount {
                         let ctPosition = coreTextPositions[i]
+                        // Fix for CJK character cursor drift: Position each glyph at the correct
+                        // terminal column position instead of using CoreText's font-based advance width.
+                        // This ensures double-width characters (like Japanese) align correctly with
+                        // the terminal's cell grid.
+                        let glyphColumn = startColumn + (i * segment.columnWidth)
                         positions[i] = CGPoint(
-                            x: ctPosition.x + xOffset,
+                            x: lineOrigin.x + CGFloat(glyphColumn) * cellDimension.width,
                             y: lineOrigin.y + yOffset + ctPosition.y)
                     }
 
