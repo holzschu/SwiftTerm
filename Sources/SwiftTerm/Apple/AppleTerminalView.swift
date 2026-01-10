@@ -504,51 +504,6 @@ extension TerminalView {
         }
         
         mutating func append(text: String, attributes: [NSAttributedString.Key: Any]) {
-#if false
-            // We need characters to occupy an integer number of columns, otherwise
-            // cursor position and arrow displacement will be off. Same with text
-            // insertion when switching from one language to another.
-            if (text != " ") && (text.count == 1) { // Don't do this scaling with spaces or long strings
-                let computedWidth = NSAttributedString(string: text, attributes: attributes).size().width
-                if (computedWidth > 2 * cellWidth) {
-                    // Scale downwards every character that is larger than 2 columns:
-                    // (applies to emojis)
-                    // (some emojis are larger than their computedWidth size, not much I can do here)
-                    if let font = attributes[.font] as? TTFont {
-                        let scalingFactor = 2 * cellWidth / computedWidth
-                        var newFont = TTFont(name: font.fontName, size: font.pointSize * scalingFactor)
-                        var newAttributes = attributes
-                        newAttributes[.font] = newFont
-                        attributedString.append(NSAttributedString(string: text, attributes: newAttributes))
-                        characterCount += 1
-                        return
-                    }
-                } else if (computedWidth > 1.4 * cellWidth) {
-                    // scale upwards characters in the 1.4-2 columns range so they fit on 2 columns:
-                    // (applies to CJK characters)
-                    if let font = attributes[.font] as? TTFont {
-                        let scalingFactor = 2 * cellWidth / computedWidth
-                        var newFont = TTFont(name: font.fontName, size: font.pointSize * scalingFactor)
-                        var newAttributes = attributes
-                        newAttributes[.font] = newFont
-                        attributedString.append(NSAttributedString(string: text, attributes: newAttributes))
-                        characterCount += 1
-                        return
-                    }
-                } else if (computedWidth > 1.1 * cellWidth) {
-                    // scale downwards characters in the 1.1-1.4 columns range so they fit on 1 column: 
-                    if let font = attributes[.font] as? TTFont {
-                        let scalingFactor = cellWidth / computedWidth
-                        var newFont = TTFont(name: font.fontName, size: font.pointSize * scalingFactor)
-                        var newAttributes = attributes
-                        newAttributes[.font] = newFont
-                        attributedString.append(NSAttributedString(string: text, attributes: newAttributes))
-                        characterCount += 1
-                        return
-                    }
-                }
-            }
-#endif
             // "Standard" characters are added directly:
             attributedString.append(NSAttributedString(string: text, attributes: attributes))
             characterCount += 1
