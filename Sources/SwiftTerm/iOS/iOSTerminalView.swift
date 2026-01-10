@@ -42,6 +42,9 @@ internal var log: Logger = Logger(subsystem: "org.tirania.SwiftTerm", category: 
  * defaults, otherwise, this uses its own set of defaults colors.
  */
 open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollViewDelegate, TerminalDelegate {
+    public static var textInputDebugEnabled: Bool = false
+    internal static var textInputLogCounter: Int = 0
+
     struct FontSet {
         public let normal: UIFont
         let bold: UIFont
@@ -293,6 +296,19 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         disableSelectionPanGesture()
     }
         
+    @objc open override func cut(_ sender: Any?) {
+        let text = selection.getSelectedText()
+        UIPasteboard.general.string = text
+        // I need to send this information to the terminalView in a way that works.
+        terminal.buffer.x = selection.end.col
+        terminal.buffer.y = selection.end.row
+        for i in 0..<text.count {
+            deleteBackward()
+        }
+        selection.selectNone()
+        disableSelectionPanGesture()
+    }
+    
     @objc open override func selectAll(_ sender: Any?) {
         selection.selectAll()
         enableSelectionPanGesture()
@@ -301,7 +317,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// Invoked when the user has long-pressed and then clicked "Select"
     @objc public override func select (_ sender: Any?)  {
         if let loc = lastLongSelect {
-            selection.selectWordOrExpression(at: Position (col: loc.col, row: loc.row), in: terminal.buffer)
+            selection.selectWordOrExpression(at: Position (col: loc.col, row: loc.row), in: terminal.displayBuffer)
             enableSelectionPanGesture()
             DispatchQueue.main.async {
                 self.showContextMenu(forRegion:  self.makeContextMenuRegionForSelection(), pos: loc)
@@ -330,6 +346,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return true
         case #selector(select(_:)):
             return !selection.active
+        case #selector(cut(_:)):
+            // Sometimes this fails because selection.active is false when we get there
+            // I'm keeping the simple code because that's not an issue where it's worth
+            // making a workaround an iOS issue.
+            return selection.active && (selection.end.row >= promptline)
         case #selector(selectAll(_:)):
             return true
         case #selector(resetCmd(_:)):
@@ -434,7 +455,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     func sharedMouseEvent (gestureRecognizer: UIGestureRecognizer, release: Bool)
     {
         let hit = calculateTapHit(gesture: gestureRecognizer)
-        if let grid = hit.grid.toScreenCoordinate(from: terminal.buffer) {
+        if let grid = hit.grid.toScreenCoordinate(from: terminal.displayBuffer) {
             terminal.sendEvent(buttonFlags: encodeFlags (release: release), x: grid.col, y: grid.row, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
         }
     }
@@ -450,7 +471,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     public func repositionVisibleFrame () {
         let topVisibleLine = contentOffset.y/cellDimension.height
         let bottomVisibleLine = (topVisibleLine+frame.height/cellDimension.height)-1
-        let lines = self.terminal.buffer.lines.count
+        let lines = self.terminal.displayBuffer.lines.count
         contentOffset.y = max(0, CGFloat(lines) - bottomVisibleLine) * cellDimension.height
     }
     
@@ -479,8 +500,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 } else {
                     let location = gestureRecognizer.location(in: gestureRecognizer.view)
                     let tapLoc = calculateTapHit(gesture: gestureRecognizer).grid
-                    let cursorRow = terminal.buffer.y+terminal.buffer.yDisp
-                    if abs (tapLoc.col-terminal.buffer.x) < 4 && abs (tapLoc.row - cursorRow) < 2 {
+                    // iOS specifics: send cursor position to terminal as well:
+                    if (tapLoc.row >= promptline) {
+                        sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
+                        sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: true)
+                    }
+                    //
+                    let displayBuffer = terminal.displayBuffer
+                    let cursorRow = displayBuffer.y + displayBuffer.yDisp
+                    if abs (tapLoc.col-displayBuffer.x) < 4 && abs (tapLoc.row - cursorRow) < 2 {
                         showContextMenu (forRegion: makeContextMenuRegionForTap (point: location), pos: tapLoc)
                     }
                 }
@@ -508,7 +536,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return
         } else {
             let hit = calculateTapHit(gesture: gestureRecognizer).grid
-            selection.selectWordOrExpression(at: hit, in: terminal.buffer)
+            selection.selectWordOrExpression(at: hit, in: terminal.displayBuffer)
             enableSelectionPanGesture()
             showContextMenu (forRegion: makeContextMenuRegionForSelection(), pos: hit)
             queuePendingDisplay()
@@ -609,7 +637,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             case .changed:
                 if terminal.mouseMode.sendButtonTracking() {
                     let hit = calculateTapHit(gesture: gestureRecognizer)
-                    if let grid = hit.grid.toScreenCoordinate(from: terminal.buffer) {
+                    if let grid = hit.grid.toScreenCoordinate(from: terminal.displayBuffer) {
                         terminal.sendMotion(buttonFlags: encodeFlags(release: false), x: grid.col, y: grid.row, pixelX: hit.pixels.col, pixelY: hit.pixels.row)
                     }
                 }
@@ -980,10 +1008,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     func updateScroller ()
     {
-        contentSize = CGSize (width: CGFloat (terminal.buffer.cols) * cellDimension.width,
-                              height: CGFloat (terminal.buffer.lines.count) * cellDimension.height)
-        //contentOffset = CGPoint (x: 0, y: CGFloat (terminal.buffer.lines.count-terminal.rows)*cellDimension.height)
-        contentOffset = CGPoint (x: 0, y: CGFloat (terminal.buffer.lines.count-terminal.rows)*cellDimension.height)
+        let displayBuffer = terminal.displayBuffer
+        contentSize = CGSize (width: CGFloat (displayBuffer.cols) * cellDimension.width,
+                              height: CGFloat (displayBuffer.lines.count) * cellDimension.height)
+        //contentOffset = CGPoint (x: 0, y: CGFloat (displayBuffer.lines.count-displayBuffer.rows)*cellDimension.height)
+        contentOffset = CGPoint (x: 0, y: CGFloat (displayBuffer.lines.count-displayBuffer.rows)*cellDimension.height)
         //Xscroller.doubleValue = scrollPosition
         //Xscroller.knobProportion = scrollThumbsize
     }
@@ -1084,14 +1113,20 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
     
     public var hasText: Bool {
-        return true
+        return !textInputStorage.isEmpty
     }
 
     /*
-        Soft keyboard input. Hardware keyboard input is handled in pressesBegan.
+        Soft keyboard input. Hardware keyboard text input is delivered here; special keys are handled in pressesBegan.
     */
     open func insertText(_ text: String) {
-        uitiLog("insertText(\"\(text)\") textInputStorage:\"\(textInputStorage)\"")
+        //uitiLog("insertText(\(text.debugDescription)) \(textInputStateDescription())")
+
+        if tryComposeKoreanFinal(text) {
+            return
+        }
+
+        beginTextInputEdit()
 
         let rangeToReplace = _markedTextRange ?? _selectedTextRange
         let rangeStartIndex = rangeToReplace.startPosition.offset
@@ -1099,6 +1134,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         _markedTextRange = nil
         let insertedPosition = TextPosition(offset: rangeStartIndex + text.count)
         _selectedTextRange = TextRange(from: insertedPosition, to: insertedPosition)
+
+        endTextInputEdit()
 
         if terminalAccessory?.controlModifier ?? false {
             self.send(applyControlToEventCharacters(text))
@@ -1108,28 +1145,85 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 resetInputBuffer()
                 self.send(data: returnByteSequence [0...])
             } else {
-                // resetInputBuffer is *required* for Tiếng Việt Telex and Korean keyboards
-                // it causes a crash with Japanese keyboards.
-                if let keyboardLanguage = self.textInputMode?.primaryLanguage {
-                    if (keyboardLanguage.hasPrefix("vi") || keyboardLanguage.hasPrefix("ko")) {
-                        resetInputBuffer() 
-                    }
-                }
                 self.send(txt: text)
             }
         }
         
         queuePendingDisplay()
     }
-    
+
+    // this is necessary because something in the iOS IME seems to prevent
+    // the sequence  "ㅇ", "ㅜ", "ㅇ" from becoming "웅", and instead
+    // it becomes "우" followed by "ㅇ"
+    private func tryComposeKoreanFinal(_ text: String) -> Bool {
+        guard let language = textInputMode?.primaryLanguage, language.hasPrefix("ko") else { return false }
+        guard _markedTextRange == nil else { return false }
+        guard _selectedTextRange.isEmpty, _selectedTextRange.endPosition.offset == textInputStorage.count else { return false }
+        guard text.count == 1, let jamo = text.first else { return false }
+        guard let finalIndex = koreanFinalIndex[jamo] else { return false }
+        guard let lastChar = textInputStorage.last else { return false }
+        guard let composed = composeHangulSyllable(base: lastChar, finalIndex: finalIndex) else { return false }
+
+        uitiLog("koreanComposeFinal base:\(lastChar) jamo:\(jamo) -> \(composed)")
+
+        beginTextInputEdit()
+        textInputStorage.removeLast()
+        textInputStorage.append(composed)
+        let newOffset = textInputStorage.count
+        _markedTextRange = nil
+        _selectedTextRange = TextRange(from: TextPosition(offset: newOffset), to: TextPosition(offset: newOffset))
+        endTextInputEdit()
+
+        send([backspaceSendsControlH ? 8 : 0x7f])
+        send(txt: String(composed))
+        queuePendingDisplay()
+        return true
+    }
+
+    private let koreanFinalIndex: [Character: Int] = [
+        "ㄱ": 1, "ㄲ": 2, "ㄳ": 3,
+        "ㄴ": 4, "ㄵ": 5, "ㄶ": 6,
+        "ㄷ": 7,
+        "ㄹ": 8, "ㄺ": 9, "ㄻ": 10, "ㄼ": 11, "ㄽ": 12, "ㄾ": 13, "ㄿ": 14, "ㅀ": 15,
+        "ㅁ": 16,
+        "ㅂ": 17, "ㅄ": 18,
+        "ㅅ": 19, "ㅆ": 20,
+        "ㅇ": 21,
+        "ㅈ": 22,
+        "ㅊ": 23,
+        "ㅋ": 24,
+        "ㅌ": 25,
+        "ㅍ": 26,
+        "ㅎ": 27
+    ]
+
+    private func composeHangulSyllable(base: Character, finalIndex: Int) -> Character? {
+        guard finalIndex > 0 && finalIndex < 28 else { return nil }
+        guard let scalar = base.unicodeScalars.first, base.unicodeScalars.count == 1 else { return nil }
+        let scalarValue = Int(scalar.value)
+        let sBase = 0xAC00
+        let sEnd = 0xD7A3
+        guard scalarValue >= sBase && scalarValue <= sEnd else { return nil }
+        let vCount = 21
+        let tCount = 28
+        let sIndex = scalarValue - sBase
+        let lIndex = sIndex / (vCount * tCount)
+        let vIndex = (sIndex % (vCount * tCount)) / tCount
+        let tIndex = sIndex % tCount
+        guard tIndex == 0 else { return nil }
+        let newScalarValue = sBase + (lIndex * vCount + vIndex) * tCount + finalIndex
+        guard let newScalar = UnicodeScalar(newScalarValue) else { return nil }
+        return Character(newScalar)
+    }
+
     func ensureCaretIsVisible ()
     {
-        contentOffset = CGPoint (x: 0, y: CGFloat (terminal.buffer.lines.count-terminal.rows)*cellDimension.height)
+        let displayBuffer = terminal.displayBuffer
+        contentOffset = CGPoint (x: 0, y: CGFloat (displayBuffer.lines.count-displayBuffer.rows)*cellDimension.height)
     }
     
     public func deleteBackward() {
-        uitiLog("deleteBackward() textInputStorage:\"\(textInputStorage)\" markedTextRange:\"\(_markedTextRange)\" selectedTextRange:\"\(_selectedTextRange)\"")
-        inputDelegate?.selectionWillChange(self)
+        uitiLog("deleteBackward() \(textInputStateDescription())")
 
         // after backward deletion, marked range is always cleared, and length of selected range is always zero
         let rangeToDelete = _markedTextRange ?? _selectedTextRange
@@ -1147,12 +1241,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 return
             }
 
+            beginTextInputEdit()
+
             rangeStartIndex -= 1
             textInputStorage.remove(at: textInputStorage.index(textInputStorage.startIndex, offsetBy: rangeStartIndex))
             rangeStartPosition = TextPosition(offset: rangeStartIndex)
 
             self.send ([backspaceSendsControlH ? 8 : 0x7f])
         } else {
+            beginTextInputEdit()
             // Send as many backspaces that are in the range to delete. When on auto-repeat, after a some time
             // pressing the backspace, it will delete chunks of text at a time.
             let oldText = textInputStorage[rangeToDelete.fullRange(in: textInputStorage)]
@@ -1167,7 +1264,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         _markedTextRange = nil
         _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
 
-        inputDelegate?.selectionDidChange(self)
+        endTextInputEdit()
     }
 
     enum SendData {
@@ -1218,9 +1315,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     public override func pressesBegan(_ presses: Set<UIPress>, with event: UIPressesEvent?) {
         var didHandleEvent = false
+
+        if _markedTextRange != nil {
+            super.pressesBegan(presses, with: event)
+            return
+        }
         
         for press in presses {
             guard let key = press.key else { continue }
+            uitiLog("pressesBegan keyCode:\(key.keyCode) chars:\(key.characters.debugDescription) ignoring:\(key.charactersIgnoringModifiers.debugDescription) modifiers:\(key.modifierFlags)")
                 
             var data: SendData? = nil
 
@@ -1288,18 +1391,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             case .keyboardDeleteForward:
                 data = .bytes (EscapeSequences.cmdDelKey)
                 
-            case .keyboardDeleteOrBackspace:
-                data = .bytes ([backspaceSendsControlH ? 8 : 0x7f])
-                
             case .keyboardEscape:
                 data = .bytes ([0x1b])
                 
             case .keyboardInsert:
                 print (".keyboardInsert ignored")
                 break
-                
-            case .keyboardReturn:
-                data = .bytes (returnByteSequence)
                 
             case .keyboardTab:
                 data = .bytes ([9])
@@ -1338,16 +1435,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                     optionAsMetaKey.toggle()
                 } else if key.modifierFlags.contains (.alternate) && optionAsMetaKey {
                     data = .text("\u{1b}\(key.charactersIgnoringModifiers)")
-                } else if !key.modifierFlags.contains (.command){
-                    if let keyboardLanguage = self.textInputMode?.primaryLanguage {
-                        // Is the keyboard language one of the multi-input languages? Chinese, Japanese, Korean and Hindi-Transliteration
-                        // If so, do not process the input yet (we'll do it later in unmarkText())
-                        if (!keyboardLanguage.hasPrefix("hi") && !keyboardLanguage.hasPrefix("zh") &&
-                            !keyboardLanguage.hasPrefix("ja") && !keyboardLanguage.hasPrefix("ko") && !keyboardLanguage.hasPrefix("vi")) {
-                            if key.characters.count > 0 {
-                                data = .text (key.characters)
-                            }
-                        }
+                } else if key.modifierFlags.contains (.control) {
+                    let controlBytes = applyControlToEventCharacters(key.charactersIgnoringModifiers)
+                    if !controlBytes.isEmpty {
+                        data = .bytes(controlBytes)
                     }
                 }
             }
@@ -1441,6 +1532,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
 
     open func isProcessTrusted(source: Terminal) -> Bool {
         true
+    }
+
+    open func cellSizeInPixels(source: Terminal) -> (width: Int, height: Int)? {
+        let scale = getImageScale()
+        let width = Int(round(cellDimension.width * scale))
+        let height = Int(round(cellDimension.height * scale))
+        return (width, height)
     }
     
     open func mouseModeChanged(source: Terminal) {

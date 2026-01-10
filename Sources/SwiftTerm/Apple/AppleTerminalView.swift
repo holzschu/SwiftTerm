@@ -9,6 +9,9 @@
 import Foundation
 import CoreGraphics
 import CoreText
+#if canImport(ImageIO)
+import ImageIO
+#endif
 import SwiftUI
 
 #if os(iOS) || os(visionOS)
@@ -48,7 +51,14 @@ struct ViewLineInfo {
     var segments: [ViewLineSegment]
     // contains an array of (image, column where the image was found)
     var images: [TerminalImage]?
+    var kittyPlaceholders: [KittyPlaceholderCell]
 }
+
+var promptline = 0
+var promptcolumn = 0
+
+var savedCursorLine = 0
+var savedCursorColumn = 0
 
 extension TerminalView {
     typealias CellDimension = CGSize
@@ -264,6 +274,12 @@ extension TerminalView {
         colorsChanged ()
     }
 
+    public func synchronizedOutputChanged (source: Terminal, active: Bool)
+    {
+        updateScroller()
+        queuePendingDisplay()
+    }
+
     public func setBackgroundColor(source: Terminal, color: Color) {
         // Can not implement this until I change the color to not be this struct
         nativeBackgroundColor = TTColor.make (color: color)
@@ -323,7 +339,10 @@ extension TerminalView {
             .backgroundColor: bg
         ]
         if flags.contains (.underline) {
-            nsattr [.underlineColor] = fg
+            let underlineColor = attribute.underlineColor.map {
+                mapColor(color: $0, isFg: true, isBold: flags.contains(.bold), useBrightColors: useBrightColors)
+            } ?? fg
+            nsattr [.underlineColor] = underlineColor
             nsattr [.underlineStyle] = NSUnderlineStyle.single.rawValue
         }
         if flags.contains (.crossedOut) {
@@ -384,7 +403,10 @@ extension TerminalView {
             .backgroundColor: mapColor(color: bg, isFg: false, isBold: false)
         ]
         if flags.contains (.underline) {
-            nsattr [.underlineColor] = fgColor
+            let underlineColor = attribute.underlineColor.map {
+                mapColor(color: $0, isFg: true, isBold: isBold, useBrightColors: useBrightColors)
+            } ?? fgColor
+            nsattr [.underlineColor] = underlineColor
             nsattr [.underlineStyle] = NSUnderlineStyle.single.rawValue
         }
         if flags.contains (.crossedOut) {
@@ -404,6 +426,62 @@ extension TerminalView {
         }
         return nsattr
     }
+
+    private func kittyImageFromRgba(bytes: [UInt8], width: Int, height: Int) -> TTImage? {
+        let rgbColorSpace = CGColorSpaceCreateDeviceRGB()
+        let bitmapInfo = CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue)
+        let data = Data(bytes)
+        guard let providerRef = CGDataProvider(data: data as CFData) else {
+            return nil
+        }
+        guard let cgimage = CGImage(width: width,
+                                    height: height,
+                                    bitsPerComponent: 8,
+                                    bitsPerPixel: 32,
+                                    bytesPerRow: width * 4,
+                                    space: rgbColorSpace,
+                                    bitmapInfo: bitmapInfo,
+                                    provider: providerRef,
+                                    decode: nil,
+                                    shouldInterpolate: true,
+                                    intent: .defaultIntent) else {
+            return nil
+        }
+        return TTImage(cgImage: cgimage, size: CGSize(width: width, height: height))
+    }
+
+    private func kittyPlaceholderImage(imageId: UInt32, cache: inout [UInt32: TTImage]) -> TTImage? {
+        if let cached = cache[imageId] {
+            return cached
+        }
+        guard let kittyImage = terminal.kittyGraphicsState.imagesById[imageId] else {
+            return nil
+        }
+        let image: TTImage?
+        switch kittyImage.payload {
+        case .png(let data):
+            image = TTImage(data: data)
+        case .rgba(let bytes, let width, let height):
+            image = kittyImageFromRgba(bytes: bytes, width: width, height: height)
+        }
+        if let image {
+            cache[imageId] = image
+        }
+        return image
+    }
+
+    private func kittyAspectFitRect(imageSize: CGSize, in rect: CGRect) -> CGRect {
+        guard imageSize.width > 0, imageSize.height > 0, rect.width > 0, rect.height > 0 else {
+            return rect
+        }
+        let scale = min(rect.width / imageSize.width, rect.height / imageSize.height)
+        let width = imageSize.width * scale
+        let height = imageSize.height * scale
+        return CGRect(x: rect.origin.x + (rect.width - width) / 2,
+                      y: rect.origin.y + (rect.height - height) / 2,
+                      width: width,
+                      height: height)
+    }
     
     //
     // Helper used by buildAttributedString to construct segments.
@@ -411,12 +489,14 @@ extension TerminalView {
     fileprivate struct ViewLineSegmentBuilder {
         let column: Int
         let columnWidth: Int
+        let cellWidth: CGFloat
         private var attributedString = NSMutableAttributedString()
         private var characterCount: Int = 0
         
-        init(column: Int, columnWidth: Int) {
+        init(column: Int, columnWidth: Int, cellWidth: CGFloat) {
             self.column = column
             self.columnWidth = columnWidth
+            self.cellWidth = cellWidth
         }
         
         var isEmpty: Bool {
@@ -424,6 +504,50 @@ extension TerminalView {
         }
         
         mutating func append(text: String, attributes: [NSAttributedString.Key: Any]) {
+            // We need characters to occupy an integer number of columns, otherwise
+            // cursor position and arrow displacement will be off. Same with text
+            // insertion when switching from one language to another.
+            if (text != " ") && (text.count == 1) { // Don't do this scaling with spaces or long strings
+                let computedWidth = NSAttributedString(string: text, attributes: attributes).size().width
+                if (computedWidth > 2 * cellWidth) {
+                    // Scale downwards every character that is larger than 2 columns:
+                    // (applies to emojis)
+                    // (some emojis are larger than their computedWidth size, not much I can do here)
+                    if let font = attributes[.font] as? TTFont {
+                        let scalingFactor = 2 * cellWidth / computedWidth
+                        var newFont = TTFont(name: font.fontName, size: font.pointSize * scalingFactor)
+                        var newAttributes = attributes
+                        newAttributes[.font] = newFont
+                        attributedString.append(NSAttributedString(string: text, attributes: newAttributes))
+                        characterCount += 1
+                        return
+                    }
+                } else if (computedWidth > 1.4 * cellWidth) {
+                    // scale upwards characters in the 1.4-2 columns range so they fit on 2 columns:
+                    // (applies to CJK characters)
+                    if let font = attributes[.font] as? TTFont {
+                        let scalingFactor = 2 * cellWidth / computedWidth
+                        var newFont = TTFont(name: font.fontName, size: font.pointSize * scalingFactor)
+                        var newAttributes = attributes
+                        newAttributes[.font] = newFont
+                        attributedString.append(NSAttributedString(string: text, attributes: newAttributes))
+                        characterCount += 1
+                        return
+                    }
+                } else if (computedWidth > 1.1 * cellWidth) {
+                    // scale downwards characters in the 1.1-1.4 columns range so they fit on 1 column: 
+                    if let font = attributes[.font] as? TTFont {
+                        let scalingFactor = cellWidth / computedWidth
+                        var newFont = TTFont(name: font.fontName, size: font.pointSize * scalingFactor)
+                        var newAttributes = attributes
+                        newAttributes[.font] = newFont
+                        attributedString.append(NSAttributedString(string: text, attributes: newAttributes))
+                        characterCount += 1
+                        return
+                    }
+                }
+            }
+            // "Standard" characters are added directly:
             attributedString.append(NSAttributedString(string: text, attributes: attributes))
             characterCount += 1
         }
@@ -445,6 +569,9 @@ extension TerminalView {
         let selectionColumns = selectedColumnsRange(row: row, cols: cols)
         var col = 0
         var builder: ViewLineSegmentBuilder?
+        var kittyPlaceholders: [KittyPlaceholderCell] = []
+        var previousPlaceholder: KittyPlaceholderCell?
+        var previousPlaceholderAttribute: Attribute?
         
         while col < cols {
             let ch: CharData = line[col]
@@ -456,6 +583,8 @@ extension TerminalView {
                     segments.append(finished)
                 }
                 builder = nil
+                previousPlaceholder = nil
+                previousPlaceholderAttribute = nil
                 col += width
                 continue
             }
@@ -464,7 +593,7 @@ extension TerminalView {
                 if let finished = builder?.buildIfNeeded() {
                     segments.append(finished)
                 }
-                builder = ViewLineSegmentBuilder(column: col, columnWidth: width)
+                builder = ViewLineSegmentBuilder(column: col, columnWidth: width, cellWidth: cellDimension.width)
             }
             
             var currentAttributes = attributes
@@ -473,7 +602,21 @@ extension TerminalView {
             }
             
             let character = ch.code == 0 ? " " : ch.getCharacter()
-            builder?.append(text: String(character), attributes: currentAttributes)
+            if let placeholder = KittyPlaceholderDecoder.decode(character: character,
+                                                                attribute: attr,
+                                                                row: row,
+                                                                col: col,
+                                                                previous: previousPlaceholder,
+                                                                previousAttribute: previousPlaceholderAttribute) {
+                kittyPlaceholders.append(placeholder)
+                builder?.append(text: " ", attributes: currentAttributes)
+                previousPlaceholder = placeholder
+                previousPlaceholderAttribute = attr
+            } else {
+                builder?.append(text: String(character), attributes: currentAttributes)
+                previousPlaceholder = nil
+                previousPlaceholderAttribute = nil
+            }
             
             col += width
         }
@@ -482,7 +625,7 @@ extension TerminalView {
             segments.append(finished)
         }
         
-        return ViewLineInfo(segments: segments, images: line.images)
+        return ViewLineInfo(segments: segments, images: line.images, kittyPlaceholders: kittyPlaceholders)
     }
     
     /// Returns the selection range for the specified row, if any.
@@ -628,6 +771,7 @@ extension TerminalView {
         let lineDescent = CTFontGetDescent(fontSet.normal)
         let lineLeading = CTFontGetLeading(fontSet.normal)
         let yOffset = ceil(lineDescent+lineLeading)
+        let displayBuffer = terminal.displayBuffer
 
         func calcLineOffset (forRow: Int) -> CGFloat {
             cellDimension.height * CGFloat (forRow-bufferOffset+1)
@@ -642,18 +786,27 @@ extension TerminalView {
         // On Mac, we are drawing the terminal buffer
         let cellHeight = cellDimension.height
         let boundsMaxY = bounds.maxY
-        let firstRow = terminal.buffer.yDisp+Int ((boundsMaxY-dirtyRect.maxY)/cellHeight)
-        let lastRow = terminal.buffer.yDisp+Int((boundsMaxY-dirtyRect.minY)/cellHeight)
+        let firstRow = displayBuffer.yDisp+Int ((boundsMaxY-dirtyRect.maxY)/cellHeight)
+        let lastRow = displayBuffer.yDisp+Int((boundsMaxY-dirtyRect.minY)/cellHeight)
         #endif
+
+        let isAltBuffer = terminal.isCurrentBufferAlternate
+        var virtualPlacementsByImageId: [UInt32: [KittyPlacementRecord]] = [:]
+        if !terminal.kittyGraphicsState.placementsByKey.isEmpty {
+            for record in terminal.kittyGraphicsState.placementsByKey.values where record.isVirtual && record.isAlternateBuffer == isAltBuffer {
+                virtualPlacementsByImageId[record.imageId, default: []].append(record)
+            }
+        }
+        var placeholderImageCache: [UInt32: TTImage] = [:]
 
         for row in firstRow...lastRow {
             if row < 0 {
                 continue
             }
-            if row >= terminal.buffer.lines.count {
+            if row >= displayBuffer.lines.count {
                 continue
             }
-            let renderMode = terminal.buffer.lines [row].renderMode
+            let renderMode = displayBuffer.lines [row].renderMode
             let lineOffset = calcLineOffset(forRow: row)
             let lineOrigin = CGPoint(x: 0, y: frame.height - lineOffset)
             
@@ -706,8 +859,38 @@ extension TerminalView {
                 continue
             } 
             #endif
-            let line = terminal.buffer.lines [row]
-            let lineInfo = buildAttributedString(row: row, line: line, cols: terminal.cols)
+            let line = displayBuffer.lines [row]
+            let lineInfo = buildAttributedString(row: row, line: line, cols: displayBuffer.cols)
+            let rowBase = lineOrigin.y + cellDimension.height
+            var underTextImages: [AppleImage] = []
+            var overTextKittyImages: [AppleImage] = []
+            var otherImages: [AppleImage] = []
+            if let images = lineInfo.images {
+                for basicImage in images {
+                    guard let image = basicImage as? AppleImage else {
+                        continue
+                    }
+                    if image.kittyIsKitty {
+                        if image.kittyZIndex < 0 {
+                            underTextImages.append(image)
+                        } else {
+                            overTextKittyImages.append(image)
+                        }
+                    } else {
+                        otherImages.append(image)
+                    }
+                }
+                let sortKitty: (AppleImage, AppleImage) -> Bool = { lhs, rhs in
+                    if lhs.kittyZIndex != rhs.kittyZIndex {
+                        return lhs.kittyZIndex < rhs.kittyZIndex
+                    }
+                    let leftId = lhs.kittyImageId ?? 0
+                    let rightId = rhs.kittyImageId ?? 0
+                    return leftId < rightId
+                }
+                underTextImages.sort(by: sortKitty)
+                overTextKittyImages.sort(by: sortKitty)
+            }
 
             for segment in lineInfo.segments {
                 guard segment.attributedString.length > 0 else {
@@ -725,12 +908,8 @@ extension TerminalView {
                         continue
                     }
                     let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
-                    let runFont = runAttributes[.font] as! TTFont
                     let startColumn = segment.column + (processedGlyphs * segment.columnWidth)
                     let endColumn = startColumn + (runGlyphsCount * segment.columnWidth)
-                    if row == 0 {
-                        print(run)
-                    }
                     var backgroundColor: TTColor?
                     if runAttributes.keys.contains(.selectionBackgroundColor) {
                         backgroundColor = runAttributes[.selectionBackgroundColor] as? TTColor
@@ -754,7 +933,7 @@ extension TerminalView {
                                 height: cellDimension.height)
                             
                             #if (lastLineExtends)
-                            if (row-terminal.buffer.yDisp) >= terminal.rows - 1 {
+                            if (row-displayBuffer.yDisp) >= displayBuffer.rows - 1 {
                                 let missing = frame.height - (cellDimension.height + CGFloat(row) + 1)
                                 rect.size.height += missing
                                 rect.origin.y -= missing
@@ -769,13 +948,49 @@ extension TerminalView {
                             // NSRect.fill() uses NSColor (set via NSColor.set()/setFill()),
                             // not CGContext's fill color. Must call setFill() before fill().
                             backgroundColor.setFill()
-                            rect.fill(using: .destinationOver)
+                            rect.fill()
                             #else
                             context.fill(rect)
                             #endif
                             context.restoreGState()
                         }
                     }
+                    processedGlyphs += runGlyphsCount
+                }
+            }
+
+            if !underTextImages.isEmpty {
+                let offsetScale = getImageScale()
+                for image in underTextImages {
+                    let col = image.col
+                    let offsetX = CGFloat(image.kittyPixelOffsetX) / offsetScale
+                    let offsetY = CGFloat(image.kittyPixelOffsetY) / offsetScale
+                    let rect = CGRect(x: CGFloat (col)*cellDimension.width + offsetX,
+                                      y: rowBase - CGFloat (image.pixelHeight) + offsetY,
+                                      width: CGFloat (image.pixelWidth),
+                                      height: CGFloat (image.pixelHeight))
+                    image.image.draw (in: rect)
+                }
+            }
+
+            for segment in lineInfo.segments {
+                guard segment.attributedString.length > 0 else {
+                    continue
+                }
+                
+                let ctline = CTLineCreateWithAttributedString(segment.attributedString)
+                guard let runs = CTLineGetGlyphRuns(ctline) as? [CTRun] else {
+                    continue
+                }
+                var processedGlyphs = 0
+                for run in runs {
+                    let runGlyphsCount = CTRunGetGlyphCount(run)
+                    if runGlyphsCount == 0 {
+                        continue
+                    }
+                    let runAttributes = CTRunGetAttributes(run) as? [NSAttributedString.Key: Any] ?? [:]
+                    let runFont = runAttributes[.font] as! TTFont
+                    let startColumn = segment.column + (processedGlyphs * segment.columnWidth)
                     
                     let runGlyphs = [CGGlyph](unsafeUninitializedCapacity: runGlyphsCount) { (bufferPointer, count) in
                         CTRunGetGlyphs(run, CFRange(), bufferPointer.baseAddress!)
@@ -817,19 +1032,71 @@ extension TerminalView {
                 }
             }
 
-            // Render any sixel content last
-            if let images = lineInfo.images {
-                let rowBase = frame.height - (CGFloat(row) * cellDimension.height)
-                for basicImage in images {
-                    guard let image = basicImage as? AppleImage else {
+            if !lineInfo.kittyPlaceholders.isEmpty {
+                for placeholder in lineInfo.kittyPlaceholders {
+                    guard let records = virtualPlacementsByImageId[placeholder.imageId] else {
                         continue
                     }
+                    guard let record = records.first(where: { record in
+                        if placeholder.placementId != 0 && record.placementId != placeholder.placementId {
+                            return false
+                        }
+                        return record.cols > placeholder.placeholderCol &&
+                            record.rows > placeholder.placeholderRow &&
+                            record.cols > 0 &&
+                            record.rows > 0
+                    }) else {
+                        continue
+                    }
+                    guard let image = kittyPlaceholderImage(imageId: placeholder.imageId, cache: &placeholderImageCache) else {
+                        continue
+                    }
+
+                    let offsetScale = getImageScale()
+                    let offsetX = CGFloat(record.pixelOffsetX) / offsetScale
+                    let offsetY = CGFloat(record.pixelOffsetY) / offsetScale
+                    let placementOriginX = lineOrigin.x + CGFloat(placeholder.col - placeholder.placeholderCol) * cellDimension.width + offsetX
+                    let placementTopY = lineOrigin.y + CGFloat(placeholder.placeholderRow) * cellDimension.height
+                    let placementOriginY = placementTopY - CGFloat(record.rows - 1) * cellDimension.height + offsetY
+                    let placementRect = CGRect(x: placementOriginX,
+                                               y: placementOriginY,
+                                               width: CGFloat(record.cols) * cellDimension.width,
+                                               height: CGFloat(record.rows) * cellDimension.height)
+                    if placementRect.width <= 0 || placementRect.height <= 0 {
+                        continue
+                    }
+                    let imageRect = kittyAspectFitRect(imageSize: image.size, in: placementRect)
+                    let cellRect = CGRect(x: lineOrigin.x + CGFloat(placeholder.col) * cellDimension.width,
+                                          y: lineOrigin.y,
+                                          width: cellDimension.width,
+                                          height: cellDimension.height)
+                    context.saveGState()
+                    context.clip(to: cellRect)
+                    image.draw(in: imageRect)
+                    context.restoreGState()
+                }
+            }
+
+            if !overTextKittyImages.isEmpty {
+                let offsetScale = getImageScale()
+                for image in overTextKittyImages {
+                    let col = image.col
+                    let offsetX = CGFloat(image.kittyPixelOffsetX) / offsetScale
+                    let offsetY = CGFloat(image.kittyPixelOffsetY) / offsetScale
+                    let rect = CGRect(x: CGFloat (col)*cellDimension.width + offsetX,
+                                      y: rowBase - CGFloat (image.pixelHeight) + offsetY,
+                                      width: CGFloat (image.pixelWidth),
+                                      height: CGFloat (image.pixelHeight))
+                    image.image.draw (in: rect)
+                }
+            }
+            if !otherImages.isEmpty {
+                for image in otherImages {
                     let col = image.col
                     let rect = CGRect(x: CGFloat (col)*cellDimension.width,
                                       y: rowBase - CGFloat (image.pixelHeight),
                                       width: CGFloat (image.pixelWidth),
                                       height: CGFloat (image.pixelHeight))
-                    
                     image.image.draw (in: rect)
                 }
             }
@@ -921,7 +1188,7 @@ extension TerminalView {
         updateCursorPosition()
         guard let (rowStart, rowEnd) = terminal.getUpdateRange () else {
             if notifyUpdateChanges {
-                let buffer = terminal.buffer
+                let buffer = terminal.displayBuffer
                 let y = buffer.yDisp+buffer.y
                 terminalDelegate?.rangeChanged (source: self, startY: y, endY: y)
             }
@@ -971,7 +1238,7 @@ extension TerminalView {
         guard let caretView else { return }
         //let lineOrigin = CGPoint(x: 0, y: frame.height - (cellDimension.height * (CGFloat(terminal.buffer.y - terminal.buffer.yDisp + 1))))
         //caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * CGFloat(terminal.buffer.x)), y: lineOrigin.y)
-        let buffer = terminal.buffer
+        let buffer = terminal.displayBuffer
         let vy = buffer.yBase + buffer.y
         
         if vy >= buffer.yDisp + buffer.rows {
@@ -988,12 +1255,13 @@ extension TerminalView {
         let offset = (cellDimension.height * (CGFloat(buffer.y-(buffer.yDisp-buffer.yBase)+1)))
         let lineOrigin = CGPoint(x: 0, y: frame.height - offset)
         #endif
-        caretView.frame.origin = CGPoint(x: lineOrigin.x + (cellDimension.width * doublePosition * CGFloat(buffer.x)), y: lineOrigin.y)
+        var stringLength = cellDimension.width * doublePosition * CGFloat(buffer.x)
+        caretView.frame.origin = CGPoint(x: lineOrigin.x + stringLength, y: lineOrigin.y)
         caretView.setText (ch: buffer.lines [vy][buffer.x])
     }
     
     // Does not use a default argument and merge, because it is called back
-    func updateDisplay ()
+    public func updateDisplay ()
     {
         updateDisplay (notifyAccessibility: true)
         updateDebugDisplay()
@@ -1060,13 +1328,14 @@ extension TerminalView {
      */
     public var scrollThumbsize: CGFloat {
         get {
-            if terminal.isCurrentBufferAlternate {
+            let displayBuffer = terminal.displayBuffer
+            if terminal.isDisplayBufferAlternate {
                 return 0
             }
             
             // the thumb size is the proportion of the visible content of the
             // entire content but don't make it too small
-            return max (CGFloat (terminal.rows) / CGFloat (terminal.buffer.lines.count), 0.01)
+            return max (CGFloat (displayBuffer.rows) / CGFloat (displayBuffer.lines.count), 0.01)
         }
     }
     
@@ -1075,16 +1344,17 @@ extension TerminalView {
      */
     public var scrollPosition: Double {
         get {
-            if terminal.isCurrentBufferAlternate || terminal.buffer.yDisp <= 0 {
+            let displayBuffer = terminal.displayBuffer
+            if terminal.isDisplayBufferAlternate || displayBuffer.yDisp <= 0 {
                 return 0
             }
             
-            let maxScrollback = terminal.buffer.lines.count - terminal.rows
-            if terminal.buffer.yDisp >= maxScrollback {
+            let maxScrollback = displayBuffer.lines.count - displayBuffer.rows
+            if displayBuffer.yDisp >= maxScrollback {
                 return 1
             }
             
-            return Double (terminal.buffer.yDisp) / Double (maxScrollback)
+            return Double (displayBuffer.yDisp) / Double (maxScrollback)
         }
     }
     
@@ -1093,19 +1363,20 @@ extension TerminalView {
     /// </summary>
     public var canScroll: Bool {
         get {
-            return !terminal.isCurrentBufferAlternate &&
-                terminal.buffer.hasScrollback &&
-                terminal.buffer.lines.count > terminal.rows
+            let displayBuffer = terminal.displayBuffer
+            return !terminal.isDisplayBufferAlternate &&
+                displayBuffer.hasScrollback &&
+                displayBuffer.lines.count > displayBuffer.rows
         }
     }
     
     public func scroll (toPosition: Double)
     {
         userScrolling = true
-        let oldPosition = terminal.buffer.yDisp
+        let displayBuffer = terminal.displayBuffer
+        let oldPosition = displayBuffer.yDisp
         
-        let maxScrollback = terminal.buffer.lines.count - terminal.rows
-        print ("maxScrollBack: \(maxScrollback)")
+        let maxScrollback = displayBuffer.lines.count - displayBuffer.rows
         var newScrollPosition = Int (Double (maxScrollback) * toPosition)
         
         if newScrollPosition < 0 {
@@ -1114,8 +1385,7 @@ extension TerminalView {
         if newScrollPosition > maxScrollback {
             newScrollPosition = maxScrollback
         }
-        print ("newScrollpsitin: \(newScrollPosition)")
-        
+
         if newScrollPosition != oldPosition {
             scrollTo(row: newScrollPosition)
         }
@@ -1124,9 +1394,9 @@ extension TerminalView {
     
     func scrollTo (row: Int, notifyAccessibility: Bool = true)
     {
-        if row != terminal.buffer.yDisp {
-            
-            terminal.buffer.yDisp = row
+        let displayBuffer = terminal.displayBuffer
+        if row != displayBuffer.yDisp {
+            terminal.setViewYDisp (row)
             
             // tell the terminal we want to refresh all the rows
             terminal.refresh (startRow: 0, endRow: terminal.rows)
@@ -1143,7 +1413,7 @@ extension TerminalView {
     /// Scrolls the content of the terminal one page up
     public func pageUp()
     {
-        if terminal.isCurrentBufferAlternate {
+        if terminal.isDisplayBufferAlternate {
             send (EscapeSequences.cmdPageUp)
         } else {
             scrollUp (lines: terminal.rows)
@@ -1153,7 +1423,7 @@ extension TerminalView {
     /// Scrolls the content of the terminal one page down
     public func pageDown ()
     {
-        if terminal.isCurrentBufferAlternate {
+        if terminal.isDisplayBufferAlternate {
             send (EscapeSequences.cmdPageDown)
         } else {
             scrollDown (lines: terminal.rows)
@@ -1163,14 +1433,15 @@ extension TerminalView {
     /// Scrolls up the content of the terminal the specified number of lines
     public func scrollUp (lines: Int)
     {
-        let newPosition = max (terminal.buffer.yDisp - lines, 0)
+        let newPosition = max (terminal.displayBuffer.yDisp - lines, 0)
         scrollTo (row: newPosition)
     }
     
     /// Scrolls down the content of the terminal the specified number of lines
     public func scrollDown (lines: Int)
     {
-        let newPosition = max (0, min (terminal.buffer.yDisp + lines, terminal.buffer.lines.count - terminal.rows))
+        let displayBuffer = terminal.displayBuffer
+        let newPosition = max (0, min (displayBuffer.yDisp + lines, displayBuffer.lines.count - displayBuffer.rows))
         scrollTo (row: newPosition)
     }
       
@@ -1220,6 +1491,13 @@ extension TerminalView {
     public func send(data: ArraySlice<UInt8>)
     {
         ensureCaretIsVisible ()
+        #if os(iOS) || os(visionOS)
+        if TerminalView.textInputDebugEnabled {
+            let previewBytes = data.prefix(32).map { String(format: "%02X", $0) }.joined(separator: " ")
+            print("UITextInput[\(TerminalView.textInputLogCounter + 1)]: send bytes=\(data.count) [\(previewBytes)]")
+            TerminalView.textInputLogCounter += 1
+        }
+        #endif
         terminalDelegate?.send (source: self, data: data)
     }
     
@@ -1228,6 +1506,12 @@ extension TerminalView {
      * - Parameter txt: the string to send to the client
      */
     public func send (txt: String) {
+        #if os(iOS) || os(visionOS)
+        if TerminalView.textInputDebugEnabled {
+            print("UITextInput[\(TerminalView.textInputLogCounter + 1)]: send txt=\(txt.debugDescription)")
+            TerminalView.textInputLogCounter += 1
+        }
+        #endif
         let array = [UInt8] (txt.utf8)
         send (data: array[...])
     }
@@ -1260,11 +1544,22 @@ extension TerminalView {
         send (terminal.applicationCursor ? EscapeSequences.moveRightApp : EscapeSequences.moveRightNormal)
     }
     
-    class AppleImage: TerminalImage {
+    class AppleImage: TerminalImage, KittyPlacementImage {
         var image: TTImage
         var pixelWidth: Int
         var pixelHeight: Int
         var col: Int
+        var kittyIsKitty: Bool = false
+        var kittyImageId: UInt32?
+        var kittyImageNumber: UInt32?
+        var kittyPlacementId: UInt32?
+        var kittyZIndex: Int = 0
+        var kittyCol: Int = 0
+        var kittyRow: Int = 0
+        var kittyCols: Int = 0
+        var kittyRows: Int = 0
+        var kittyPixelOffsetX: Int = 0
+        var kittyPixelOffsetY: Int = 0
         
         init (image: TTImage, width: Int, height: Int, onCol: Int) {
             self.image = image
@@ -1295,7 +1590,11 @@ extension TerminalView {
         }
         
         let image = TTImage (cgImage: cgimage, size: CGSize (width: width, height: height))
-        insertImage (image, width: CGFloat (width) > frame.width ? .percent(100) : .auto, height: .auto, preserveAspectRatio: true)
+        if let context = terminal.kittyPlacementContext {
+            insertImage (image, width: context.widthRequest, height: context.heightRequest, preserveAspectRatio: context.preserveAspectRatio)
+        } else {
+            insertImage (image, width: CGFloat (width) > frame.width ? .percent(100) : .auto, height: .auto, preserveAspectRatio: true)
+        }
     }
    
     public func createImage (source: Terminal, data: Data, width widthRequest: ImageSizeRequest, height heightRequest: ImageSizeRequest, preserveAspectRatio: Bool)
@@ -1314,6 +1613,7 @@ extension TerminalView {
         let buffer = terminal.buffer
         var img = image
         let displayScale = getImageScale ()
+        let placementContext = terminal.kittyPlacementContext
         
         // Converts a size request in a single dimension into an absolute pixel value, where
         // the `dim` is the request, `regionSize` is the available view space, and `imageSize` is
@@ -1330,9 +1630,45 @@ extension TerminalView {
                 return CGFloat (pct) * 0.01 * regionSize
             }
         }
-        
-        var width = getPixels (fromDim: widthRequest, regionSize: frame.width, imageSize: img.size.width, cellSize: cellDimension.width)
-        var height = getPixels (fromDim: heightRequest, regionSize: frame.height, imageSize: img.size.height, cellSize: cellDimension.height)
+
+        func pixelSizeForImage (_ image: TTImage) -> CGSize? {
+            #if os(macOS)
+            for rep in image.representations {
+                if rep.pixelsWide > 0 && rep.pixelsHigh > 0 {
+                    return CGSize(width: rep.pixelsWide, height: rep.pixelsHigh)
+                }
+            }
+            return nil
+            #else
+            if let cgImage = image.cgImage {
+                return CGSize(width: cgImage.width, height: cgImage.height)
+            }
+            let scale = image.scale
+            if scale > 0 {
+                return CGSize(width: image.size.width * scale, height: image.size.height * scale)
+            }
+            return nil
+            #endif
+        }
+
+        let pixelSize = placementContext == nil ? nil : pixelSizeForImage(img)
+        let widthImageSize: CGFloat
+        let heightImageSize: CGFloat
+        switch widthRequest {
+        case .auto:
+            widthImageSize = pixelSize?.width ?? img.size.width
+        default:
+            widthImageSize = img.size.width
+        }
+        switch heightRequest {
+        case .auto:
+            heightImageSize = pixelSize?.height ?? img.size.height
+        default:
+            heightImageSize = img.size.height
+        }
+
+        var width = getPixels (fromDim: widthRequest, regionSize: frame.width, imageSize: widthImageSize, cellSize: cellDimension.width)
+        var height = getPixels (fromDim: heightRequest, regionSize: frame.height, imageSize: heightImageSize, cellSize: cellDimension.height)
         
         if preserveAspectRatio {
             switch (widthRequest, heightRequest) {
@@ -1348,8 +1684,30 @@ extension TerminalView {
         }
         
         let rows = Int (ceil (height/cellDimension.height))
+        let cols = Int (ceil (width/cellDimension.width))
+        let placementRow = buffer.y + buffer.yBase
+        let placementCol = buffer.x
+        if let context = placementContext,
+           let imageId = context.imageId,
+           let placementId = context.placementId {
+            terminal.registerKittyPlacement(imageId: imageId,
+                                            placementId: placementId,
+                                            parentImageId: context.parentImageId,
+                                            parentPlacementId: context.parentPlacementId,
+                                            parentOffsetH: context.parentOffsetH,
+                                            parentOffsetV: context.parentOffsetV,
+                                            pixelOffsetX: context.pixelOffsetX,
+                                            pixelOffsetY: context.pixelOffsetY,
+                                            col: placementCol,
+                                            row: placementRow,
+                                            cols: cols,
+                                            rows: rows,
+                                            zIndex: context.zIndex,
+                                            isVirtual: false)
+        }
         
         let stripeSize = CGSize (width: width, height: cellDimension.height)
+        var didScroll = false
         #if os(iOS) || os(visionOS)
         var srcY: CGFloat = 0
         #else
@@ -1369,16 +1727,48 @@ extension TerminalView {
             #endif
             
             let attachedImage = AppleImage (image: stripe, width: Int (stripeSize.width), height: Int (cellDimension.height), onCol: terminal.buffer.x)
+            if let context = placementContext {
+                attachedImage.kittyIsKitty = true
+                attachedImage.kittyImageId = context.imageId
+                attachedImage.kittyImageNumber = context.imageNumber
+                attachedImage.kittyPlacementId = context.placementId
+                attachedImage.kittyZIndex = context.zIndex
+                attachedImage.kittyCol = placementCol
+                attachedImage.kittyRow = placementRow
+                attachedImage.kittyCols = cols
+                attachedImage.kittyRows = rows
+                attachedImage.kittyPixelOffsetX = context.pixelOffsetX
+                attachedImage.kittyPixelOffsetY = context.pixelOffsetY
+            }
             
             buffer.lines [buffer.y+buffer.yBase].attach(image: attachedImage)
 
             terminal.updateRange (buffer.y)
-            
+
             // The buffer.x position would have changed depending on the lineFeedMode (LNM)
             // for image rendering, we want the x to remain the same
             let savedX = buffer.x
+            let previousYBase = buffer.yBase
+            let previousLinesTop = buffer.linesTop
             terminal.cmdLineFeed()
+            if buffer.yBase != previousYBase || buffer.linesTop != previousLinesTop {
+                didScroll = true
+            }
             buffer.x = savedX
+        }
+        if didScroll {
+            terminal.updateFullScreen()
+        }
+        if let context = placementContext,
+           context.cursorPolicy == 0,
+           !context.isRelative {
+            let moveCols = max(1, cols)
+            let moveRows = max(1, rows)
+            let targetCol = placementCol + moveCols
+            let targetRow = placementRow + moveRows
+            buffer.x = targetCol
+            buffer.y = targetRow - buffer.yBase
+            terminal.restrictCursor()
         }
     }
     
@@ -1409,6 +1799,169 @@ extension TerminalView {
         selection.selectNone()
     }
     
+    // functions required for a-Shell:
+    public func getLastLine() -> String {
+        if promptline < 0 {
+            return ""
+        }
+        if promptline >= terminal.buffer.lines.count {
+            return ""
+        }
+        var result = ""
+        for r in promptline..<terminal.buffer.lines.count {
+            let line =  terminal.buffer.lines [r]
+            if (line[0].code == 0) {
+                break
+            }
+            var start = 0
+            if (r == promptline) {
+                start = promptcolumn
+            }
+            for i in start..<line.count {
+                if line[i].code == 0 {
+                    if i > 0 && line[i-1].width > 1 {
+                        continue
+                    } else {
+                        break
+                    }
+                }
+                result.append(line[i].getCharacter())
+            }
+        }
+        return result
+    }
+
+    public func getLastPrompt() -> String {
+        if promptline < 0 {
+            return ""
+        }
+        if promptline >= terminal.buffer.lines.count {
+            return ""
+        }
+        var result = ""
+        var r = promptline
+        while (r >= 0) && (result.count < 50) {
+            let line =  terminal.buffer.lines [r]
+            var end = line.count - 1 
+            if (r == promptline) {
+                end = promptcolumn - 1
+            }
+            r -= 1
+            if (end < 0) { 
+                continue
+            }
+            for i in (0...end).reversed() {
+                if line[i].code == 0 {
+                    if i > 0 && line[i-1].code == 0 {
+                        return result
+                    } else {
+                        continue
+                    }
+                }
+                result = String(line[i].getCharacter()) + result
+            }
+        }
+        return result
+    }
+
+    public func setPromptEnd() {
+        guard let caretView else { return }
+        updateCursorPosition()
+        promptline = terminal.buffer.yBase + terminal.buffer.y
+        promptcolumn = terminal.buffer.x
+    }
+
+    public func saveCursorPosition() {
+        savedCursorLine = terminal.buffer.yBase + terminal.buffer.y
+        savedCursorColumn = terminal.buffer.x
+        print("saving cursor position to \(terminal.buffer.y), \(terminal.buffer.x)")
+    }
+
+    public func restoreCursorPosition() {
+        terminal.buffer.x = savedCursorColumn
+        terminal.buffer.y = savedCursorLine - terminal.buffer.yBase
+        print("restored cursor position to \(terminal.buffer.y), \(terminal.buffer.x)")
+    }
+
+    public func getCurrentChar() -> String {
+        let currentLine = terminal.buffer.yBase + terminal.buffer.y
+        // 0-code char after a two-char-length emoji: get the previous one
+        if terminal.buffer.x > 1 && terminal.buffer.lines[currentLine][terminal.buffer.x - 1].code == 0 {
+            return String(terminal.buffer.lines[currentLine][terminal.buffer.x - 2].getCharacter())
+        }
+        if (terminal.buffer.x == 0) {
+            return ""
+        }
+        return String(terminal.buffer.lines[currentLine][terminal.buffer.x - 1].getCharacter())
+    }
+
+    public func moveUpIfNeeded() {
+        // If the user has pressed a left arrow, and we're at the beginning of the line, 
+        // move to the end of the next line if we need to.
+       let currentLine = terminal.buffer.yBase + terminal.buffer.y
+       if (currentLine <= promptline) {
+           return 
+       }
+       if (terminal.buffer.x == 0) {
+           terminal.buffer.y -= 1
+           terminal.buffer.x = terminal.buffer.lines [currentLine].count
+       }
+    }
+
+    public func moveDownIfNeeded() {
+        // If the user has pressed a left arrow, and we're at the beginning of the line, 
+        // move to the end of the next line if we need to.
+       let currentLine = terminal.buffer.yBase + terminal.buffer.y
+       if (currentLine >= terminal.buffer.lines.count) {
+           return 
+       }
+       if (terminal.buffer.x == terminal.buffer.lines [currentLine].count - 1) {
+           terminal.buffer.y += 1
+           terminal.buffer.x = 0
+       }
+    }
+
+    public func atTheEndOfTheLine() -> Bool {
+        // Special case when a command ends on the last character of the line,
+        // and SwiftTerm doesn't return to the next line. 
+        let currentLine = terminal.buffer.yBase + terminal.buffer.y
+        let line =  terminal.buffer.lines [currentLine]
+        return  (terminal.buffer.x == 0) && (line[line.count-1].code != 0)
+    }
+    
+    // used for history
+    public func moveToBeginningOfLine() {
+        // back to the cursor position: 
+        terminal.buffer.x = promptcolumn
+        terminal.buffer.y = promptline - terminal.buffer.yBase
+    }
+
+    // used for history
+    public func clearToEndOfLine() {
+        let currentLine = terminal.buffer.yBase + terminal.buffer.y
+        let line =  terminal.buffer.lines [currentLine]
+        for x in terminal.buffer.x..<line.count {
+            line[x] = CharData.Null
+        }
+        for l in terminal.buffer.yBase + terminal.buffer.y + 1..<terminal.buffer.lines.count {
+            let line = terminal.buffer.lines[l]
+            for x in 0..<line.count {
+                line[x] = CharData.Null
+            }
+        }
+    }
+
+    // used by exit on iPhones
+    public func wipeContents() {
+        terminal.buffer.x = 0
+        terminal.buffer.y = 0
+        for l in 0..<terminal.buffer.lines.count {
+            let line = terminal.buffer.lines[l]
+            for c in 0..<line.count {
+                line[c] = CharData.Null
+            }
+        }
+    }
 }
 
 #if canImport(UIKit) && DEBUG
