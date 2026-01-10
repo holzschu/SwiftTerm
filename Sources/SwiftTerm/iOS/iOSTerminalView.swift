@@ -296,6 +296,19 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         disableSelectionPanGesture()
     }
         
+    @objc open override func cut(_ sender: Any?) {
+        let text = selection.getSelectedText()
+        UIPasteboard.general.string = text
+        // I need to send this information to the terminalView in a way that works.
+        terminal.buffer.x = selection.end.col
+        terminal.buffer.y = selection.end.row
+        for i in 0..<text.count {
+            deleteBackward()
+        }
+        selection.selectNone()
+        disableSelectionPanGesture()
+    }
+    
     @objc open override func selectAll(_ sender: Any?) {
         selection.selectAll()
         enableSelectionPanGesture()
@@ -333,6 +346,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return true
         case #selector(select(_:)):
             return !selection.active
+        case #selector(cut(_:)):
+            // Sometimes this fails because selection.active is false when we get there
+            // I'm keeping the simple code because that's not an issue where it's worth
+            // making a workaround an iOS issue.
+            return selection.active && (selection.end.row >= promptline)
         case #selector(selectAll(_:)):
             return true
         case #selector(resetCmd(_:)):
@@ -482,6 +500,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 } else {
                     let location = gestureRecognizer.location(in: gestureRecognizer.view)
                     let tapLoc = calculateTapHit(gesture: gestureRecognizer).grid
+                    // iOS specifics: send cursor position to terminal as well:
+                    if (tapLoc.row >= promptline) {
+                        sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
+                        sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: true)
+                    }
+                    //
                     let displayBuffer = terminal.displayBuffer
                     let cursorRow = displayBuffer.y + displayBuffer.yDisp
                     if abs (tapLoc.col-displayBuffer.x) < 4 && abs (tapLoc.row - cursorRow) < 2 {
