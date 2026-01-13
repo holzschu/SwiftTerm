@@ -301,8 +301,9 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         let text = selection.getSelectedText()
         UIPasteboard.general.string = text
         // I need to send this information to the terminalView in a way that works.
-        terminal.buffer.x = selection.end.col
-        terminal.buffer.y = selection.end.row
+        print("col: \(selection.end.col) row: \(selection.end.row)")
+        // terminal.buffer.x = selection.end.col
+        // terminal.buffer.y = selection.end.row
         for i in 0..<text.count {
             deleteBackward()
         }
@@ -501,10 +502,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 } else {
                     let location = gestureRecognizer.location(in: gestureRecognizer.view)
                     let tapLoc = calculateTapHit(gesture: gestureRecognizer).grid
-                    // iOS specifics: send cursor position to terminal as well:
+                    // iOS specifics: send cursor position to the terminal as well:
+                    print("tapLoc: \(tapLoc.row) promptline: \(promptline) displayBuffer.yDisp: \(terminal.displayBuffer.yDisp)")
                     if (tapLoc.row >= promptline) {
                         sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
-                        sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: true)
                     }
                     //
                     let displayBuffer = terminal.displayBuffer

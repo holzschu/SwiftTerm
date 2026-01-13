@@ -1845,6 +1845,38 @@ extension TerminalView {
         print("restored cursor position to \(terminal.buffer.y), \(terminal.buffer.x)")
     }
 
+    // sets the cursor position to (x,y) and sends back how far we are from the end of the prompt:
+    public func setCursorPosition(x: Int, y: Int) -> Int {
+        var lastUsedLine = 0
+        if (terminal.buffer.lines.count == terminal.rows) {
+            // Still on first screen, must find the real last line
+            for i in (0..<terminal.buffer.lines.count).reversed() {
+                var line = terminal.buffer.lines[i]
+                if (line[0].code != 0) {
+                    lastUsedLine = i
+                    break
+                }
+            }
+        } else {
+            lastUsedLine = terminal.buffer.lines.count
+        }
+
+        if (y + terminal.buffer.yBase >= lastUsedLine) {
+            terminal.buffer.y = lastUsedLine
+        } else {
+            terminal.buffer.y = y
+        }
+        if (terminal.buffer.y <= promptline) && (x < promptcolumn) {
+            terminal.buffer.y = promptline
+            terminal.buffer.x = promptcolumn
+        } else {
+            terminal.buffer.x = x
+        }
+        print("x= \(terminal.buffer.x) y= \(terminal.buffer.y) base= \(terminal.buffer.yBase) promptline= \(promptline)")
+        updateCursorPosition()
+        return (x - promptcolumn) + (y + terminal.buffer.yBase - promptline) * terminal.buffer.lines[promptline].count
+    }
+
     public func getCurrentChar() -> String {
         let currentLine = terminal.buffer.yBase + terminal.buffer.y
         // 0-code char after a two-char-length emoji: get the previous one
@@ -1871,7 +1903,7 @@ extension TerminalView {
     }
 
     public func moveDownIfNeeded() {
-        // If the user has pressed a left arrow, and we're at the beginning of the line, 
+        // If the user has pressed a left arrow, and we're at the end of the line, 
         // move to the end of the next line if we need to.
        let currentLine = terminal.buffer.yBase + terminal.buffer.y
        if (currentLine >= terminal.buffer.lines.count) {
@@ -1905,10 +1937,12 @@ extension TerminalView {
         for x in terminal.buffer.x..<line.count {
             line[x] = CharData.Null
         }
-        for l in terminal.buffer.yBase + terminal.buffer.y + 1..<terminal.buffer.lines.count {
-            let line = terminal.buffer.lines[l]
-            for x in 0..<line.count {
-                line[x] = CharData.Null
+        if (terminal.buffer.yBase + terminal.buffer.y + 1 <= terminal.buffer.lines.count) {
+            for l in terminal.buffer.yBase + terminal.buffer.y + 1..<terminal.buffer.lines.count {
+                let line = terminal.buffer.lines[l]
+                    for x in 0..<line.count {
+                        line[x] = CharData.Null
+                    }
             }
         }
     }
