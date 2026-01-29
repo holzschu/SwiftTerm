@@ -300,15 +300,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     @objc open override func cut(_ sender: Any?) {
         let text = selection.getSelectedText()
         UIPasteboard.general.string = text
-        // I need to send this information to the terminalView in a way that works.
-        print("col: \(selection.end.col) row: \(selection.end.row)")
-        // terminal.buffer.x = selection.end.col
-        // terminal.buffer.y = selection.end.row
+        moveToEndOfSelection()
         for i in 0..<text.count {
             deleteBackward()
         }
-        selection.selectNone()
-        disableSelectionPanGesture()
     }
     
     @objc open override func selectAll(_ sender: Any?) {
@@ -503,8 +498,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                     let location = gestureRecognizer.location(in: gestureRecognizer.view)
                     let tapLoc = calculateTapHit(gesture: gestureRecognizer).grid
                     // iOS specifics: send cursor position to the terminal as well:
-                    print("tapLoc: \(tapLoc.row) promptline: \(promptline) displayBuffer.yDisp: \(terminal.displayBuffer.yDisp)")
-                    if (tapLoc.row >= promptline) {
+                    if (tapLoc.row >= promptline) && !selection.active {
                         sharedMouseEvent(gestureRecognizer: gestureRecognizer, release: false)
                     }
                     //
@@ -1629,6 +1623,44 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     public func iTermContent (source: Terminal, content: ArraySlice<UInt8>) {
         terminalDelegate?.iTermContent(source: self, content: content)
     }
+
+    // iOS extensions: 
+    public func moveToEndOfSelection() {
+        let myPoint = Position(col: min (max (0, selection.end.col), terminal.cols-1), row: selection.end.row)
+        
+        if let grid = myPoint.toScreenCoordinate(from: terminal.displayBuffer) {
+            // pixelX and pixelY are only used if mouseProtocol == .sgrPixel (not us)
+            terminal.sendEvent(buttonFlags: encodeFlags (release: false), x: grid.col, y: grid.row, pixelX: 0, pixelY: 0)
+        }
+        selection.selectNone()
+        disableSelectionPanGesture()
+    }        
+
+    public func moveToBeginningOfSelection() {
+        let myPoint = Position(col: min (max (0, selection.start.col), terminal.cols-1), row: selection.start.row)
+        
+        if let grid = myPoint.toScreenCoordinate(from: terminal.displayBuffer) {
+            // pixelX and pixelY are only used if mouseProtocol == .sgrPixel (not us)
+            terminal.sendEvent(buttonFlags: encodeFlags (release: false), x: grid.col, y: grid.row, pixelX: 0, pixelY: 0)
+        }
+        selection.selectNone()
+        disableSelectionPanGesture()
+    }
+
+    public func deleteSelection() {
+        // delete the text currently selected (before insertion, for example)
+        // same as "cut", but without copying the text.
+        if (selection.end.row >= promptline) {
+            let text = selection.getSelectedText()
+            // do not send erase if the selected text was not on the promptline.
+            moveToEndOfSelection()
+            for i in 0..<text.count {
+                self.send ([backspaceSendsControlH ? 8 : 0x7f])
+            }
+        }
+    }
+    
+
 }
 
 // Default implementations for TerminalViewDelegate

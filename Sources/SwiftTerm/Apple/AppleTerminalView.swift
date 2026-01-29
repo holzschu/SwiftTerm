@@ -1836,17 +1836,15 @@ extension TerminalView {
     public func saveCursorPosition() {
         savedCursorLine = terminal.buffer.yBase + terminal.buffer.y
         savedCursorColumn = terminal.buffer.x
-        print("saving cursor position to \(terminal.buffer.y), \(terminal.buffer.x)")
     }
 
     public func restoreCursorPosition() {
         terminal.buffer.x = savedCursorColumn
         terminal.buffer.y = savedCursorLine - terminal.buffer.yBase
-        print("restored cursor position to \(terminal.buffer.y), \(terminal.buffer.x)")
     }
 
     // sets the cursor position to (x,y) and sends back how far we are from the end of the prompt:
-    public func setCursorPosition(x: Int, y: Int) -> Int {
+    public func setCursorPosition(x: Int, y: Int) -> Int? {
         var lastUsedLine = 0
         if (terminal.buffer.lines.count == terminal.rows) {
             // Still on first screen, must find the real last line
@@ -1861,6 +1859,10 @@ extension TerminalView {
             lastUsedLine = terminal.buffer.lines.count
         }
 
+        if (y + terminal.buffer.yBase < promptline) {
+            return nil
+        }
+
         if (y + terminal.buffer.yBase >= lastUsedLine) {
             terminal.buffer.y = lastUsedLine
         } else {
@@ -1872,7 +1874,6 @@ extension TerminalView {
         } else {
             terminal.buffer.x = x
         }
-        print("x= \(terminal.buffer.x) y= \(terminal.buffer.y) base= \(terminal.buffer.yBase) promptline= \(promptline)")
         updateCursorPosition()
         return (x - promptcolumn) + (y + terminal.buffer.yBase - promptline) * terminal.buffer.lines[promptline].count
     }
@@ -1923,11 +1924,42 @@ extension TerminalView {
         return  (terminal.buffer.x == 0) && (line[line.count-1].code != 0)
     }
     
-    // used for history
+    // used for history and control-A
     public func moveToBeginningOfLine() {
-        // back to the cursor position: 
+        // back to the cursor position when the prompt was set: 
         terminal.buffer.x = promptcolumn
         terminal.buffer.y = promptline - terminal.buffer.yBase
+    }
+
+    public func moveToEndOfLine() {
+        // find the last line
+        var lastUsedLine = 0
+        if (terminal.buffer.lines.count == terminal.rows) {
+            // Still on first screen, must find the real last line
+            for i in (0..<terminal.buffer.lines.count).reversed() {
+                var line = terminal.buffer.lines[i]
+                if (line[0].code != 0) {
+                    lastUsedLine = i
+                    break
+                }
+            }
+        } else {
+            lastUsedLine = terminal.buffer.lines.count
+        }
+        // On that line, find the last character:
+        let lastLine = terminal.buffer.lines[lastUsedLine]
+        terminal.buffer.y = lastUsedLine - terminal.buffer.yBase
+        for i in 0..<lastLine.count {
+            if lastLine[i].code == 0 {
+                if i > 0 && lastLine[i-1].width > 1 {
+                    continue
+                } else {
+                    terminal.buffer.x = i
+                    return 
+                }
+            }
+        }
+        terminal.buffer.x = lastLine.count - 1
     }
 
     // used for history
