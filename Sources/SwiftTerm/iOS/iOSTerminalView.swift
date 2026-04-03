@@ -292,13 +292,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         self.fontSet = FontSet (font: font ?? FontSet.defaultFont)
         cellDimension = CellDimension(width: 1, height: 1)
         super.init (frame: frame)
+        setup()
         isAccessibilityElement = false
         // accessibilityTraits.formUnion([.staticText, .causesPageTurn])
         accessibilityTraits = .none
         accessibilityTextualContext = .sourceCode
         accessibilityContainerType = .list
         accessibilityNavigationStyle = .separate
-        setup()
     }
     
     public override init (frame: CGRect)
@@ -306,13 +306,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         self.fontSet = FontSet (font: FontSet.defaultFont)
         cellDimension = CellDimension(width: 1, height: 1)
         super.init (frame: frame)
+        setup()
         isAccessibilityElement = false
         // accessibilityTraits.formUnion([.staticText, .causesPageTurn])
         accessibilityTraits = .none
         accessibilityTextualContext = .sourceCode
         accessibilityContainerType = .list
         accessibilityNavigationStyle = .separate
-        setup()
     }
     
     public required init? (coder: NSCoder)
@@ -1536,6 +1536,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         }
     }
 
+    /*
     open override func accessibilityScroll(_ direction: UIAccessibilityScrollDirection) -> Bool {
         let pageHeight = max(bounds.height, cellDimension.height)
         let maxOffsetY = max(0, contentSize.height - bounds.height)
@@ -1559,7 +1560,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         // Based on WWDC 2019 presentation: argument is nil
         UIAccessibility.post(notification: .pageScrolled, argument: nil)
         return true
-    }
+    } */
 
     // iOS Keyboard input
     
@@ -2782,6 +2783,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             y: lineOrigin.y + 3 - offset,
             width: CGFloat(columnCount) * cellDimension.width,
             height: verticalWidth * cellDimension.height)
+        NSLog("rect: \(rect)")
         return rect
     }
 
@@ -2801,11 +2803,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 axElement.accessibilityLabel = terminal.getDisplayText(start: start, end: end)
                 axElement.accessibilityValue = terminal.getDisplayText(start: start, end: end)
                 axElement.accessibilityFrame = accessibilityFrame(forLineNumber: line)
+                // axElement.accessibilityFrameInContainerSpace = accessibilityFrame(forLineNumber: line)
                 axElement.isAccessibilityElement = true
                 axElement.accessibilityTraits = .staticText
+                NSLog("line: \(line) value= \(axElement.accessibilityValue) frame= \(axElement.accessibilityFrame)")
                 returnElements.append(axElement)
             }
-            UIAccessibility.post(notification: .layoutChanged, argument: nil)
             return returnElements
         }
         set {
