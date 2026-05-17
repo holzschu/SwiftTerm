@@ -58,7 +58,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     public var savedCursorLine = 0
     public var savedCursorColumn = 0
     public var savedCursorLinesTop = 0
-
+    public var currentCommandVoiceOver = ""
     
     public static var textInputDebugEnabled: Bool = false // ProcessInfo.processInfo.environment["SWIFTTERM_TEXT_INPUT_DEBUG"] == "1"
     internal static var textInputLogCounter: Int = 0
@@ -2953,8 +2953,16 @@ extension TerminalView: UIAccessibilityReadingContent {
     }
 
     public func accessibilityContent(forLineNumber lineNumber: Int) -> String? {
-        var startingLine = startingLine(forLineNumber: lineNumber)
-        var endingLine = endingLine(forLineNumber: lineNumber)
+        // We are on (or after) the command line. Speak the complete line, with insertion point:
+        if (lineNumber >= savedCursorLine) {
+            // first get the prompt:
+            let start = Position(col: 0, row: savedCursorLine)
+            let end = Position(col: savedCursorColumn, row: savedCursorLine)
+            let prompt = terminal.getDisplayText(start: start, end: end)
+            return prompt + " " + currentCommandVoiceOver
+        }
+        let startingLine = startingLine(forLineNumber: lineNumber)
+        let endingLine = endingLine(forLineNumber: lineNumber)
         let start = Position(col: 0, row: startingLine)
         let end = Position(col: terminal.buffer.lines[endingLine].count,
                            row: endingLine)
@@ -2963,15 +2971,19 @@ extension TerminalView: UIAccessibilityReadingContent {
     }
     
     public func accessibilityFrame(forLineNumber lineNumber: Int) -> CGRect {
+        // We are on (or after) the command line. Speak the complete line, with insertion point:
+        var startingLine = startingLine(forLineNumber: lineNumber)
+        if (lineNumber >= savedCursorLine) {
+            startingLine = savedCursorLine
+        }
+        let endingLine =  endingLine(forLineNumber: lineNumber)
         let topVisibleLine = Int(contentOffset.y/cellDimension.height)
         let offset = contentOffset.y - CGFloat(topVisibleLine) * cellDimension.height
-        var startingLine = startingLine(forLineNumber: lineNumber)
-        var endingLine = endingLine(forLineNumber: lineNumber)
-        var verticalWidth = CGFloat(endingLine - startingLine + 1)
+        let verticalWidth = CGFloat(endingLine - startingLine + 1)
         let lineOffset =  cellDimension.height * CGFloat (startingLine - topVisibleLine + 1)
         let lineOrigin = CGPoint(x: 0, y: lineOffset)
         let columnCount = terminal.buffer.lines[lineNumber].count
-        var rect = CGRect(
+        let rect = CGRect(
             x: lineOrigin.x,
             y: lineOrigin.y + 3 - offset,
             width: CGFloat(columnCount) * cellDimension.width,
@@ -2990,10 +3002,18 @@ extension TerminalView: UIAccessibilityReadingContent {
     }
 
     public func accessibilityAttributedContent(forLineNumber lineNumber: Int) -> NSAttributedString? {
-        var startingLine = startingLine(forLineNumber: lineNumber)
-        var endingLine = endingLine(forLineNumber: lineNumber)
-        var start = Position(col: 0, row: startingLine)
-        var end = Position(col: terminal.buffer.lines[endingLine].count,
+        // We are on (or after) the command line. Speak the complete line, with insertion point:
+        if (lineNumber >= savedCursorLine) {
+            // first get the prompt:
+            let start = Position(col: 0, row: savedCursorLine)
+            let end = Position(col: savedCursorColumn, row: savedCursorLine)
+            let prompt = terminal.getDisplayText(start: start, end: end)
+            return NSAttributedString(string: prompt + " " + currentCommandVoiceOver)
+        }
+        let startingLine = startingLine(forLineNumber: lineNumber)
+        let endingLine = endingLine(forLineNumber: lineNumber)
+        let start = Position(col: 0, row: startingLine)
+        let end = Position(col: terminal.buffer.lines[endingLine].count,
                            row: endingLine)
         return accessibilityAttributedDisplayText(start: start, end: end)
     }
@@ -3007,6 +3027,26 @@ extension TerminalView: UIAccessibilityReadingContent {
                            row: startLine + lines)
         return accessibilityAttributedDisplayText(start: start, end: end)
     }
+    
+#if UndocumentedFeatureGetsDocumented
+    public override var accessibilityNextTextNavigationElement: Any? {
+        get {
+            return self
+        }
+        set {
+            
+        }
+    }
+    
+    public override var accessibilityPreviousTextNavigationElement: Any? {
+        get {
+            return self
+        }
+        set {
+            
+        }
+    }
+#endif
 }
 
 
