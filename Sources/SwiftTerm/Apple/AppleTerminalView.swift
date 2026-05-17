@@ -2383,7 +2383,7 @@ extension TerminalView {
     public func setPromptEnd() {
         guard let caretView else { return }
         updateCursorPosition()
-        promptline = terminal.buffer.yBase + terminal.buffer.y
+        promptline = terminal.buffer.linesTop + terminal.buffer.yBase + terminal.buffer.y
         promptcolumn = terminal.buffer.x
     }
 
@@ -2423,7 +2423,7 @@ extension TerminalView {
             lastUsedLine = terminal.buffer.lines.count
         }
 
-        if (y + terminal.buffer.yBase < promptline) {
+        if (y + terminal.buffer.linesTop + terminal.buffer.yBase < promptline) {
             return nil
         }
 
@@ -2439,7 +2439,7 @@ extension TerminalView {
             terminal.buffer.x = x
         }
         updateCursorPosition()
-        return (x - promptcolumn) + (y + terminal.buffer.yBase - promptline) * terminal.buffer.lines[promptline].count
+        return (x - promptcolumn) + (y + terminal.buffer.linesTop + terminal.buffer.yBase - promptline) * terminal.buffer.lines[promptline].count
     }
 
     public func getCurrentChar() -> String {
@@ -2457,7 +2457,7 @@ extension TerminalView {
     public func moveUpIfNeeded() {
         // If the user has pressed a left arrow, and we're at the beginning of the line, 
         // move to the end of the next line if we need to.
-       let currentLine = terminal.buffer.yBase + terminal.buffer.y
+       let currentLine = terminal.buffer.linesTop + terminal.buffer.yBase + terminal.buffer.y
        if (currentLine <= promptline) {
            return 
        }
@@ -2492,7 +2492,7 @@ extension TerminalView {
     public func moveToBeginningOfLine() {
         // back to the cursor position when the prompt was set: 
         terminal.buffer.x = promptcolumn
-        terminal.buffer.y = promptline - terminal.buffer.yBase
+        terminal.buffer.y = promptline - terminal.buffer.yBase - terminal.buffer.linesTop
     }
 
     public func moveToEndOfLine() {
