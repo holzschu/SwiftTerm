@@ -355,7 +355,7 @@ extension TerminalView {
 
     public func synchronizedOutputChanged (source: Terminal, active: Bool)
     {
-        SyncDebug.log("delegate active=\(active)")
+        // SyncDebug.log("delegate active=\(active)")
         if !active {
             updateScroller()
             queuePendingDisplay()
@@ -1616,12 +1616,12 @@ extension TerminalView {
     {
         defer { pendingDisplay = false }
         if terminal.synchronizedOutputActive {
-            SyncDebug.log("paint-blocked sync=true")
+            // SyncDebug.log("paint-blocked sync=true")
             return
         }
         updateCursorPosition()
         guard let (rowStart, rowEnd) = terminal.getUpdateRange () else {
-            SyncDebug.log("paint-norange (cursor-only)")
+            // SyncDebug.log("paint-norange (cursor-only)")
             if notifyUpdateChanges {
                 let buffer = terminal.displayBuffer
                 let y = buffer.yDisp+buffer.y
@@ -1649,7 +1649,7 @@ extension TerminalView {
             terminalDelegate?.rangeChanged (source: self, startY: rowStart, endY: rowEnd)
         }
 
-        SyncDebug.log("paint rows=\(rowStart)-\(rowEnd)")
+        // SyncDebug.log("paint rows=\(rowStart)-\(rowEnd)")
         terminal.clearUpdateRange ()
 
         #if os(macOS)
@@ -1779,7 +1779,7 @@ extension TerminalView {
     func queuePendingDisplay ()
     {
         if terminal.synchronizedOutputActive {
-            SyncDebug.log("queue-blocked sync=true")
+            // SyncDebug.log("queue-blocked sync=true")
             return
         }
         // throttle
@@ -1788,12 +1788,12 @@ extension TerminalView {
             // let fps30 = 16670000*2
             let fpsDelay = fps60
             pendingDisplay = true
-            SyncDebug.log("queue-scheduled (+16.67ms)")
+            // SyncDebug.log("queue-scheduled (+16.67ms)")
             DispatchQueue.main.asyncAfter(
                 deadline: DispatchTime (uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds + UInt64 (fpsDelay)),
                 execute: updateDisplay)
         } else {
-            SyncDebug.log("queue-noop (already pending)")
+            // SyncDebug.log("queue-noop (already pending)")
         }
     }
 
@@ -1991,7 +1991,7 @@ extension TerminalView {
     
     func feedFinish ()
     {
-        SyncDebug.log("feedFinish sync=\(terminal.synchronizedOutputActive)")
+        // SyncDebug.log("feedFinish sync=\(terminal.synchronizedOutputActive)")
         suspendDisplayUpdates ()
         queuePendingDisplay()
     }
