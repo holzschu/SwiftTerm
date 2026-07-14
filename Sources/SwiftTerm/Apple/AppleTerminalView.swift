@@ -427,7 +427,6 @@ extension TerminalView {
 
     public func synchronizedOutputChanged (source: Terminal, active: Bool)
     {
-        // SyncDebug.log("delegate active=\(active)")
         if !active {
             updateScroller()
             queuePendingDisplay()
@@ -753,6 +752,13 @@ extension TerminalView {
             if isSelected {
                 var mutable = attributes
                 mutable[.selectionBackgroundColor] = selectedTextBackgroundColor
+                mutable[.foregroundColor] = selectedTextForegroundColor
+                if mutable[.underlineColor] != nil {
+                    mutable[.underlineColor] = selectedTextForegroundColor
+                }
+                if mutable[.strikethroughColor] != nil {
+                    mutable[.strikethroughColor] = selectedTextForegroundColor
+                }
                 currentAttributes = mutable
             } else {
                 currentAttributes = attributes
@@ -1287,6 +1293,16 @@ extension TerminalView {
         }
         var placeholderImageCache: [UInt32: TTImage] = [:]
 
+        #if os(macOS)
+        // Clear the invalidated region before painting. We fill only cells that carry
+        // an explicit background; default-background cells rely on transparent backing-
+        // store pixels showing the layer's background color. AppKit clears the backing
+        // store only on a full-view redraw, so a partial repaint (a restricted DECSTBM
+        // scroll region, line insert/delete) otherwise keeps stale glyphs/backgrounds.
+        // Clear to transparent — not fill — so a translucent background is preserved.
+        context.clear(dirtyRect)
+        #endif
+
         for row in firstRow...lastRow {
             if row < 0 {
                 continue
@@ -1727,12 +1743,10 @@ extension TerminalView {
     {
         defer { pendingDisplay = false }
         if terminal.synchronizedOutputActive {
-            // SyncDebug.log("paint-blocked sync=true")
             return
         }
         updateCursorPosition()
         guard let (rowStart, rowEnd) = terminal.getUpdateRange () else {
-            // SyncDebug.log("paint-norange (cursor-only)")
             if notifyUpdateChanges {
                 let buffer = terminal.displayBuffer
                 let y = buffer.yDisp+buffer.y
@@ -1760,7 +1774,6 @@ extension TerminalView {
             terminalDelegate?.rangeChanged (source: self, startY: rowStart, endY: rowEnd)
         }
 
-        // SyncDebug.log("paint rows=\(rowStart)-\(rowEnd)")
         terminal.clearUpdateRange ()
 
         #if os(macOS)
@@ -1776,6 +1789,14 @@ extension TerminalView {
             let oh = region.height
             let oy = region.origin.y
             region = CGRect (x: 0, y: 0, width: frame.width, height: oh + oy)
+        } else {
+            // Region ends mid-screen (a restricted DECSTBM region): extend the
+            // invalidation down by one cell so the sub-cell remainder just below the
+            // band's bottom row (descenders / tall unicode) is cleared too. Previously
+            // only rowEnd == rows-1 got this, leaving a one-row ghost below the region.
+            let extra = cellDimension.height
+            let newY = max (0, region.origin.y - extra)
+            region = CGRect (x: 0, y: newY, width: frame.width, height: region.maxY - newY)
         }
 #if canImport(MetalKit)
         if metalView != nil {
@@ -1894,7 +1915,6 @@ extension TerminalView {
     func queuePendingDisplay ()
     {
         if terminal.synchronizedOutputActive {
-            // SyncDebug.log("queue-blocked sync=true")
             return
         }
         // throttle
@@ -1903,12 +1923,10 @@ extension TerminalView {
             // let fps30 = 16670000*2
             let fpsDelay = fps60
             pendingDisplay = true
-            // SyncDebug.log("queue-scheduled (+16.67ms)")
             DispatchQueue.main.asyncAfter(
                 deadline: DispatchTime (uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds + UInt64 (fpsDelay)),
                 execute: updateDisplay)
         } else {
-            // SyncDebug.log("queue-noop (already pending)")
         }
     }
 
@@ -2021,11 +2039,10 @@ extension TerminalView {
     
     public func scroll (toPosition: Double)
     {
-        userScrolling = true
         let displayBuffer = terminal.displayBuffer
         let oldPosition = displayBuffer.yDisp
         
-        let maxScrollback = displayBuffer.lines.count - displayBuffer.rows
+        let maxScrollback = max(0, displayBuffer.lines.count - displayBuffer.rows)
         var newScrollPosition = Int (Double (maxScrollback) * toPosition)
         
         if newScrollPosition < 0 {
@@ -2037,25 +2054,48 @@ extension TerminalView {
 
         if newScrollPosition != oldPosition {
             scrollTo(row: newScrollPosition)
+        } else {
+            updateUserScrollingState(for: newScrollPosition, in: displayBuffer)
         }
-        userScrolling = false
+    }
+
+    private func updateUserScrollingState(for row: Int, in displayBuffer: Buffer) {
+        let maxScrollback = max(0, displayBuffer.lines.count - displayBuffer.rows)
+        let isUserScrolling = row < maxScrollback
+        userScrolling = isUserScrolling
+        terminal.userScrolling = isUserScrolling
     }
     
     public func scrollTo (row: Int, notifyAccessibility: Bool = true)
     {
         let displayBuffer = terminal.displayBuffer
-        if row != displayBuffer.yDisp {
-            terminal.setViewYDisp (row)
-            
+        let maxScrollback = max(0, displayBuffer.lines.count - displayBuffer.rows)
+        let targetRow = max(0, min(row, maxScrollback))
+#if os(iOS) || os(visionOS)
+        resetManualScrollOffsetWithinRow()
+#endif
+        updateUserScrollingState(for: targetRow, in: displayBuffer)
+
+        if targetRow != displayBuffer.yDisp {
+            terminal.setViewYDisp (targetRow)
+
             // tell the terminal we want to refresh all the rows
             terminal.refresh (startRow: 0, endRow: terminal.rows)
-            
+
             // do the display update
             updateDisplay (notifyAccessibility: notifyAccessibility)
             //selectionView.notifyScrolled(source: terminal)
             terminalDelegate?.scrolled (source: self, position: scrollPosition)
             updateScroller()
             setNeedsDisplay(frame)
+        } else {
+#if os(iOS) || os(visionOS)
+            // The row did not change, but we just cleared any sub-row manual
+            // scroll offset above; resync contentOffset so a later output-driven
+            // updateScroller does not snap the view up by that stale fractional
+            // amount.
+            updateScroller()
+#endif
         }
     }
     
@@ -2106,11 +2146,58 @@ extension TerminalView {
     
     func feedFinish ()
     {
-        // SyncDebug.log("feedFinish sync=\(terminal.synchronizedOutputActive)")
         suspendDisplayUpdates ()
+        if shouldDisplayImmediatelyAfterUserInput() {
+            displayImmediately()
+            return
+        }
         queuePendingDisplay()
     }
-    
+
+    private func shouldDisplayImmediatelyAfterUserInput() -> Bool {
+        guard !terminal.synchronizedOutputActive else { return false }
+        let last = loadLastUserInputUptimeNs()
+        guard last > 0 else { return false }
+        let now = DispatchTime.now().uptimeNanoseconds
+        guard now >= last else { return false }
+        return now - last <= interactiveInputDisplayWindowNs
+    }
+
+    /// Records that the user just produced input, opening the immediate-display
+    /// window. `lastUserInputUptimeNs` is written here on the main thread but
+    /// read from the (possibly background) feed thread in feedFinish(), so both
+    /// accesses go through userInputLock to avoid a data race / torn read.
+    func recordUserInput() {
+        let now = DispatchTime.now().uptimeNanoseconds
+        userInputLock.lock()
+        lastUserInputUptimeNs = now
+        userInputLock.unlock()
+    }
+
+    private func loadLastUserInputUptimeNs() -> UInt64 {
+        userInputLock.lock()
+        defer { userInputLock.unlock() }
+        return lastUserInputUptimeNs
+    }
+
+    private func displayImmediately() {
+        guard !Thread.isMainThread else {
+            updateDisplay()
+            return
+        }
+        // Coalesce with the throttled path: if a redraw is already scheduled
+        // (either here or via queuePendingDisplay), don't post another. This
+        // bypasses the 16.67ms frame-rate timer so echo feels responsive, while
+        // still collapsing a burst of feed chunks into a single main-thread
+        // redraw instead of flooding the main queue with one updateDisplay per
+        // chunk. updateDisplay() clears pendingDisplay, reopening the gate.
+        guard !pendingDisplay else { return }
+        pendingDisplay = true
+        DispatchQueue.main.async { [weak self] in
+            self?.updateDisplay()
+        }
+    }
+
     /// Sends data to the terminal emulator for interpretation, this can be invoked from a background thread
     public func feed (byteArray: ArraySlice<UInt8>)
     {
@@ -2156,6 +2243,7 @@ extension TerminalView {
      */
     public func send(data: ArraySlice<UInt8>)
     {
+        recordUserInput()
         ensureCaretIsVisible ()
         #if os(iOS) || os(visionOS)
         if TerminalView.textInputDebugEnabled {
