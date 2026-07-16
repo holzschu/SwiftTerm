@@ -60,6 +60,12 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     public var savedCursorLinesTop = 0
     public var currentCommandVoiceOver = ""
     
+    private enum PendingKoreanResyllabificationResult {
+        case none
+        case prefixReinserted
+        case completed
+    }
+
     public static var textInputDebugEnabled: Bool = false // ProcessInfo.processInfo.environment["SWIFTTERM_TEXT_INPUT_DEBUG"] == "1"
     internal static var textInputLogCounter: Int = 0
 
@@ -258,6 +264,11 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     // We use this as temporary storage for UITextInput, which we send to the terminal on demand
     var textInputStorage: String = ""
     var pendingAutoPeriodDeleteWasSpace: Bool = false
+    private var koreanResyllabificationTransaction = HangulInput.ResyllabificationTransaction()
+
+    func resetKoreanResyllabificationTransaction() {
+        koreanResyllabificationTransaction.reset()
+    }
 
     // This tracks the marked text, part of the UITextInput protocol, which is used to flag temporary data entry, that might
     // be removed afterwards by the input system (input methods will insert approximiations, mark and change on demand)
@@ -804,7 +815,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                     let cursorRow = displayBuffer.y + displayBuffer.yDisp
                     if abs (tapLoc.col-displayBuffer.x) < 4 && abs (tapLoc.row - cursorRow) < 2 {
                         showContextMenu (forRegion: makeContextMenuRegionForTap (point: location), pos: tapLoc)
-                    }               
+                    }
                 }
             }
             queuePendingDisplay()
@@ -1825,6 +1836,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         text == "." || text == ". "
     }
 
+    private var isKoreanTextInput: Bool {
+        textInputMode?.primaryLanguage?.hasPrefix("ko") == true
+    }
+
     private func normalizedTextForPendingAutoPeriodDelete(_ text: String) -> String? {
         switch text {
         case ".":
@@ -1882,8 +1897,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             pendingAutoPeriodDeleteWasSpace = false
         }
 
-        if tryComposeKoreanFinal(text) {
+        switch processPendingKoreanResyllabification(text) {
+        case .completed:
             return
+        case .prefixReinserted:
+            break
+        case .none:
+            if tryResyllabifyKoreanFinalBeforeVowel(text) || tryComposeKoreanFinal(text) {
+                return
+            }
         }
 
         beginTextInputEdit()
@@ -2329,13 +2351,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     // the sequence  "ㅇ", "ㅜ", "ㅇ" from becoming "웅", and instead
     // it becomes "우" followed by "ㅇ"
     private func tryComposeKoreanFinal(_ text: String) -> Bool {
-        guard let language = textInputMode?.primaryLanguage, language.hasPrefix("ko") else { return false }
+        guard isKoreanTextInput else { return false }
         guard _markedTextRange == nil else { return false }
         guard _selectedTextRange.isEmpty, _selectedTextRange.endPosition.offset == textInputStorage.textInputUTF16Count else { return false }
         guard text.count == 1, let jamo = text.first else { return false }
-        guard let finalIndex = koreanFinalIndex[jamo] else { return false }
+        guard let finalIndex = HangulInput.finalIndexByJamo[jamo] else { return false }
         guard let lastChar = textInputStorage.last else { return false }
-        guard let composed = composeHangulSyllable(base: lastChar, finalIndex: finalIndex) else { return false }
+        guard let composed = HangulInput.composeSyllable(base: lastChar, finalIndex: finalIndex) else { return false }
 
         uitiLog("koreanComposeFinal base:\(lastChar) jamo:\(jamo) -> \(composed)")
 
@@ -2353,40 +2375,88 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         return true
     }
 
-    private let koreanFinalIndex: [Character: Int] = [
-        "ㄱ": 1, "ㄲ": 2, "ㄳ": 3,
-        "ㄴ": 4, "ㄵ": 5, "ㄶ": 6,
-        "ㄷ": 7,
-        "ㄹ": 8, "ㄺ": 9, "ㄻ": 10, "ㄼ": 11, "ㄽ": 12, "ㄾ": 13, "ㄿ": 14, "ㅀ": 15,
-        "ㅁ": 16,
-        "ㅂ": 17, "ㅄ": 18,
-        "ㅅ": 19, "ㅆ": 20,
-        "ㅇ": 21,
-        "ㅈ": 22,
-        "ㅊ": 23,
-        "ㅋ": 24,
-        "ㅌ": 25,
-        "ㅍ": 26,
-        "ㅎ": 27
-    ]
+    /// Completes the delete -> prefix reinsert -> composed syllable sequence
+    /// emitted by the Korean iOS keyboard when it moves a final consonant to
+    /// the next syllable. At this point the prefix is already in the terminal
+    /// and input buffer, so replace it with the complete corrected text.
+    private func processPendingKoreanResyllabification(_ text: String) -> PendingKoreanResyllabificationResult {
+        guard isKoreanTextInput,
+              _markedTextRange == nil,
+              _selectedTextRange.isEmpty,
+              _selectedTextRange.endPosition.offset == textInputStorage.textInputUTF16Count else {
+            resetKoreanResyllabificationTransaction()
+            return .none
+        }
 
-    private func composeHangulSyllable(base: Character, finalIndex: Int) -> Character? {
-        guard finalIndex > 0 && finalIndex < 28 else { return nil }
-        guard let scalar = base.unicodeScalars.first, base.unicodeScalars.count == 1 else { return nil }
-        let scalarValue = Int(scalar.value)
-        let sBase = 0xAC00
-        let sEnd = 0xD7A3
-        guard scalarValue >= sBase && scalarValue <= sEnd else { return nil }
-        let vCount = 21
-        let tCount = 28
-        let sIndex = scalarValue - sBase
-        let lIndex = sIndex / (vCount * tCount)
-        let vIndex = (sIndex % (vCount * tCount)) / tCount
-        let tIndex = sIndex % tCount
-        guard tIndex == 0 else { return nil }
-        let newScalarValue = sBase + (lIndex * vCount + vIndex) * tCount + finalIndex
-        guard let newScalar = UnicodeScalar(newScalarValue) else { return nil }
-        return Character(newScalar)
+        switch koreanResyllabificationTransaction.consumeInsertion(text) {
+        case .noMatch:
+            return .none
+        case .prefixReinserted:
+            return .prefixReinserted
+        case let .replacement(replacementText):
+            guard let prefix = replacementText.first, textInputStorage.last == prefix else {
+                return .none
+            }
+
+            uitiLog("koreanResyllabifyTransaction replace prefix:\(prefix) with:\(replacementText.debugDescription)")
+
+            beginTextInputEdit()
+            textInputStorage.removeLast()
+            textInputStorage.append(contentsOf: replacementText)
+            let newOffset = textInputStorage.textInputUTF16Count
+            _markedTextRange = nil
+            _selectedTextRange = TextRange(from: TextPosition(offset: newOffset), to: TextPosition(offset: newOffset))
+            endTextInputEdit()
+
+            sendBackspaceKey()
+            send(txt: replacementText)
+            queuePendingDisplay()
+            return .completed
+        }
+    }
+
+    // If a vowel follows a syllable with a final consonant, Korean IMEs can
+    // reinterpret that final consonant as the initial consonant of the next
+    // syllable. For example, "핫" + "ㅔ" must replace "핫" with "하세",
+    // preserving the previous syllable instead of sending only "세".
+    private func tryResyllabifyKoreanFinalBeforeVowel(_ text: String) -> Bool {
+        guard isKoreanTextInput else { return false }
+        guard _markedTextRange == nil else { return false }
+        guard _selectedTextRange.isEmpty, _selectedTextRange.endPosition.offset == textInputStorage.textInputUTF16Count else { return false }
+        guard text.count == 1, let vowel = text.first else { return false }
+        guard HangulInput.vowelIndexByJamo[vowel] != nil else { return false }
+        guard let lastChar = textInputStorage.last else { return false }
+        guard let edit = HangulInput.resyllabificationEdit(base: lastChar, followingVowel: vowel) else { return false }
+
+        uitiLog("koreanResyllabifyFinal base:\(lastChar) vowel:\(vowel) delete:\(edit.charactersToDelete) insert:\(edit.textToInsert.debugDescription)")
+
+        beginTextInputEdit()
+        for _ in 0..<edit.charactersToDelete {
+            textInputStorage.removeLast()
+        }
+        textInputStorage.append(contentsOf: edit.textToInsert)
+        let newOffset = textInputStorage.textInputUTF16Count
+        _markedTextRange = nil
+        _selectedTextRange = TextRange(from: TextPosition(offset: newOffset), to: TextPosition(offset: newOffset))
+        endTextInputEdit()
+
+        for _ in 0..<edit.charactersToDelete {
+            sendBackspaceKey()
+        }
+        send(txt: edit.textToInsert)
+        queuePendingDisplay()
+        return true
+    }
+
+    private func trackKoreanResyllabificationDeletion(_ deletedText: Substring, range: TextRange) {
+        guard isKoreanTextInput,
+              _markedTextRange == nil,
+              range.endPosition.offset == textInputStorage.textInputUTF16Count else {
+            resetKoreanResyllabificationTransaction()
+            return
+        }
+
+        koreanResyllabificationTransaction.begin(deletedText: String(deletedText))
     }
 
     public func ensureCaretIsVisible ()
@@ -2410,6 +2480,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         var rangeStartPosition = rangeToDelete.startPosition
         var rangeStartIndex = rangeStartPosition.offset
         if rangeToDelete.isEmpty {
+            resetKoreanResyllabificationTransaction()
             // If there is no selected text, delete the character before the cursor
 
             if rangeStartIndex == 0 {
@@ -2445,13 +2516,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             // Send as many backspaces that are in the range to delete. When on auto-repeat, after a some time
             // pressing the backspace, it will delete chunks of text at a time.
             let oldText = textInputStorage[rangeToDelete.fullRange(in: textInputStorage)]
+            trackKoreanResyllabificationDeletion(oldText, range: rangeToDelete)
             let backspaces = oldText.count
             for _ in 0..<backspaces {
                 self.sendBackspaceKey()
             }
-            
+
             textInputStorage.removeSubrange(rangeToDelete.fullRange(in: textInputStorage))
         }
+
         _markedTextRange = nil
         _selectedTextRange = TextRange(from: rangeStartPosition, to: rangeStartPosition)
 
