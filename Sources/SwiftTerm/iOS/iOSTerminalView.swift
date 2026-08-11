@@ -544,7 +544,13 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     }
 
     @objc open override func copy(_ sender: Any?) {
-        UIPasteboard.general.string = selection.getSelectedText()
+        if let url = contextMenuURL {
+            UIPasteboard.general.string = url.components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespaces) }.joined()
+            contextMenuURL = nil
+        } else {
+            UIPasteboard.general.string = selection.getSelectedText()
+        }
         selection.selectNone()
         disableSelectionPanGesture()
     }
@@ -605,12 +611,62 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
             return true
         case #selector(resetCmd(_:)):
             return true
+        case #selector(openURLInBrowser(_:)):
+            return contextMenuURL != nil
         default:
             //print ("canPerformAction invoked for \(action)")
             return false
         }
     }
     
+    /// URL detected at the last context menu invocation; used for "Open in Browser" action
+    var contextMenuURL: String?
+
+    /// Detects a URL at the given buffer position, or from the current selection.
+    /// Returns a clean URL with any embedded newlines (from line wrapping) removed.
+    func detectURLForMenu(at pos: Position) -> String? {
+        // If a URL was already pinpointed (e.g., by longPress URL-range selection), keep it.
+        if let existing = contextMenuURL, !existing.isEmpty {
+            return existing
+        }
+        // Check selected text: join wrapped lines so a multi-row URL becomes one string.
+        if selection.active && selection.hasSelectionRange {
+            let raw = selection.getSelectedText()
+            let joined = raw
+                .components(separatedBy: .newlines)
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .joined()
+                .trimmingCharacters(in: .whitespaces)
+            if joined.hasPrefix("http://") || joined.hasPrefix("https://") {
+                return joined
+            }
+            // Selection may include leading text before the URL (e.g., prompt chars).
+            for prefix in ["https://", "http://"] {
+                if let range = joined.range(of: prefix) {
+                    let candidate = String(joined[range.lowerBound...])
+                    // Only treat as URL if it has no spaces (avoids false positives).
+                    if !candidate.contains(" ") {
+                        return candidate
+                    }
+                }
+            }
+        }
+        // Fall back to SwiftTerm's implicit/explicit link detector at the tap position.
+        let implicit = terminal.link(at: .buffer(pos), mode: .explicitAndImplicit)
+        return implicit
+    }
+
+    @objc func openURLInBrowser(_ sender: Any?) {
+        guard let urlString = contextMenuURL else { return }
+        contextMenuURL = nil
+        // Strip any residual newlines that could come from multi-line selection.
+        let cleanURL = urlString
+            .components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined()
+        terminalDelegate?.requestOpenLink(source: self, link: cleanURL, params: [:])
+    }
+
     /// Shows the context menu for the terminal, the arguments play a key role:
     /// - Parameters:
     ///  - region: This is the location that we want to avoid having the menu being shown
@@ -618,22 +674,23 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     ///  to auto-select a word
     func showContextMenu (forRegion: CGRect, pos: Position) {
         var items: [UIMenuItem] = []
-        
+
         lastLongSelect = pos
         lastLongSelectRegion = forRegion
 
-        //GAR: Declutter context menu
-        //items.append (UIMenuItem(title: "Reset", action: #selector(resetCmd)))
-        
+        // Add "URL 열기" if a URL is detectable at this position / selection.
+        // Note: longPress may have already set contextMenuURL; detectURLForMenu preserves it.
+        contextMenuURL = detectURLForMenu(at: pos)
+        if contextMenuURL != nil {
+            items.append(UIMenuItem(title: "URL 열기", action: #selector(openURLInBrowser(_:))))
+        }
+
         // Configure the shared menu controller
         let menuController = UIMenuController.shared
         menuController.menuItems = items
-        
-        // Set the location of the menu in the view.
-        //let menuLocation = CGRect (origin: at, size: CGSize (width: cellDimension.width, height: cellDimension.height))
         menuController.showMenu(from: self, rect: forRegion)
     }
-    
+
     // This is a position relative to the buffer
     var lastLongSelect: Position?
     var lastLongSelectRegion = CGRect.zero
@@ -653,16 +710,110 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                        height: CGFloat (selection.end.row-selection.start.row+1)*cellDimension.height)
     }
     
+    /// Read raw text from one display-buffer line (strips trailing spaces).
+    private func displayLineText(row: Int) -> String {
+        let buf = terminal.displayBuffer
+        guard row >= 0 && row < buf.lines.count else { return "" }
+        let line = buf.lines[row]
+        var result = ""
+        for i in 0..<line.count {
+            let code = line[i].code
+            if code == 0 { break }
+            if let scalar = Unicode.Scalar(UInt32(bitPattern: code)) {
+                result.append(Character(scalar))
+            }
+        }
+        return result.trimmingCharacters(in: .whitespaces)
+    }
+
+    /// URL characters that can appear in a percent-encoded URL (RFC 3986 + common extras).
+    private static let urlScalars: CharacterSet =
+        .alphanumerics.union(CharacterSet(charactersIn: "-_.~:/?#[]@!$&'()*+,;=%"))
+
+    /// Extends a link match across subsequent non-wrapped lines whose content
+    /// looks like a URL continuation (program inserted \n inside a long URL).
+    /// Returns (fullURL, endRow, endCol).
+    private func extendURLAcrossLines(_ match: Terminal.LinkMatch) -> (url: String, endRow: Int, endCol: Int) {
+        let buf = terminal.displayBuffer
+        var fullURL = match.text
+        var endRow  = match.rowRanges.last?.row ?? match.row
+        var endCol  = match.rowRanges.last?.range.upperBound ?? match.range.upperBound
+
+        var nextRow = endRow + 1
+        while nextRow < buf.lines.count {
+            let lineText = displayLineText(row: nextRow)
+            guard !lineText.isEmpty else { break }
+            // Must not contain spaces (would indicate it's a new paragraph/command)
+            guard !lineText.contains(" ") else { break }
+            // Must look like URL content (only URL-safe scalars)
+            guard lineText.unicodeScalars.allSatisfy({ Self.urlScalars.contains($0) }) else { break }
+            // Must NOT itself start a fresh URL scheme (that would be a new link)
+            let lower = lineText.lowercased()
+            guard !lower.hasPrefix("http://") && !lower.hasPrefix("https://") else { break }
+
+            fullURL += lineText
+            endRow   = nextRow
+            endCol   = lineText.count
+            nextRow += 1
+        }
+        return (fullURL, endRow, endCol)
+    }
+
     @objc func longPress (_ gestureRecognizer: UILongPressGestureRecognizer)
     {
-         if gestureRecognizer.state == .began {
-             let _ = self.becomeFirstResponder()
-             let tapLocation = gestureRecognizer.location(in: gestureRecognizer.view)
-             let tapRegion = makeContextMenuRegionForTap (point: tapLocation)
-             
-             showContextMenu (forRegion: tapRegion,
-                              pos: calculateTapHit (gesture: gestureRecognizer).grid)
-          }
+        let tapHit = calculateTapHit(gesture: gestureRecognizer).grid
+
+        switch gestureRecognizer.state {
+        case .began:
+            let _ = self.becomeFirstResponder()
+            let tapLocation = gestureRecognizer.location(in: gestureRecognizer.view ?? self)
+
+            // Try to detect a URL at the tap position and select its full range.
+            // Fall back to word selection if no URL is found.
+            let linkMatchResult = terminal.linkMatch(at: .buffer(tapHit), mode: .explicitAndImplicit)
+            if let match = linkMatchResult, !match.text.isEmpty {
+                // Extend across subsequent lines that are explicit-newline URL continuations
+                let (fullURL, endRow, endCol) = extendURLAcrossLines(match)
+                let urlStart = Position(col: match.rowRanges.first?.range.lowerBound ?? match.range.lowerBound,
+                                        row: match.rowRanges.first?.row ?? match.row)
+                let urlEnd   = Position(col: endCol, row: endRow)
+                selection.setSelection(start: urlStart, end: urlEnd)
+                selection.pivot = urlStart
+                contextMenuURL = fullURL
+            } else {
+                // No URL — select the word / expression at the tap position
+                selection.selectWordOrExpression(at: tapHit, in: terminal.displayBuffer)
+                selection.pivot = tapHit
+                contextMenuURL = nil
+            }
+            selection.selectionMode = .character
+            enableSelectionPanGesture()
+
+            let region = selection.hasSelectionRange
+                ? makeContextMenuRegionForSelection()
+                : makeContextMenuRegionForTap(point: tapLocation)
+            showContextMenu(forRegion: region, pos: tapHit)
+
+        case .changed:
+            // Finger moved while still holding — extend the selection.
+            if selection.active {
+                UIMenuController.shared.hideMenu()
+                selection.pivotExtend(bufferPosition: tapHit)
+                contextMenuURL = nil  // selection changed; URL check happens on .ended
+                setNeedsDisplay()
+            }
+
+        case .ended:
+            // Finger lifted after dragging — show copy/open menu over the selection.
+            if selection.active && selection.hasSelectionRange {
+                DispatchQueue.main.async {
+                    self.showContextMenu(forRegion: self.makeContextMenuRegionForSelection(), pos: tapHit)
+                }
+            }
+
+        default:
+            break
+        }
     }
     
     /// This controls whether the backspace should send ^? or ^H, the default is ^?
@@ -998,7 +1149,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     
     @objc func panSelectionHandler (_ gestureRecognizer: UIPanGestureRecognizer) {
         func near (_ pos1: Position, _ pos2: Position) -> Bool {
-            return abs (pos1.col-pos2.col) < 3 && abs (pos1.row-pos2.row) < 2
+            return abs (pos1.col-pos2.col) < 6 && abs (pos1.row-pos2.row) < 3
         }
         
         switch gestureRecognizer.state {
@@ -2799,7 +2950,7 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 break
             case .keyboardPause, .keyboardStop, .keyboardMute, .keyboardVolumeUp, .keyboardVolumeDown:
                 break
-                
+
             default:
                 if key.modifierFlags.contains ([.alternate, .command]) && key.charactersIgnoringModifiers == "o" {
                     optionAsMetaKey.toggle()
