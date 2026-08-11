@@ -341,7 +341,7 @@ open class Terminal {
     public private(set) var buffer: Buffer
 
     private let synchronizedOutputTimeoutSeconds: TimeInterval = 1.0
-    public private(set) var synchronizedOutputActive: Bool = false
+    public private(set) var synchronizedOutputActive: Bool = true
     private var synchronizedOutputTimeoutItem: DispatchWorkItem?
 
     var displayBuffer: Buffer {
