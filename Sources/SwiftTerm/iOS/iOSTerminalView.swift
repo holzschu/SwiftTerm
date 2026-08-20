@@ -2714,6 +2714,22 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 commandActive = true
             }
             uitiLog("pressesBegan keyCode:\(key.keyCode) chars:\(key.characters.debugDescription) ignoring:\(key.charactersIgnoringModifiers.debugDescription) modifiers:\(key.modifierFlags)")
+
+            // command-something shortcuts (must be here, because the next test returns):
+            if kittyFlags.isEmpty, key.modifierFlags.contains(.command) {
+                switch (key.characters) {
+                case "n": // new window
+                    if (UIDevice.current.model.hasPrefix("iPad")) {
+                        UIApplication.shared.requestSceneSessionActivation(nil, userActivity: nil, options: nil)
+                    }
+                case "k": // clear screen
+                    let data: SendData = .bytes ([0x0c]) // control-L
+                    sendData (data: data)
+                default:
+                    break
+                }
+            }
+            
             if kittyFlags.isEmpty,
                key.modifierFlags.contains(.command),
                !(key.modifierFlags.contains(.alternate) && key.charactersIgnoringModifiers == "o") {
@@ -2844,6 +2860,15 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
                 
             var data: SendData? = nil
 
+            // on an external keyboard, command + . sends escape, but the keycode is 55 (".")
+            // This ensures that escape is always forwarded as escape
+            switch key.characters {
+            case UIKeyCommand.inputEscape:
+                data = .bytes ([0x1b])
+            default:
+                break
+            }
+            
             switch key.keyCode {
             case .keyboardCapsLock:
                 break // ignored

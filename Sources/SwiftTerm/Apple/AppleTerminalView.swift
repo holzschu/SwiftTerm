@@ -2907,12 +2907,12 @@ extension TerminalView {
         send (data: (bytes)[...])
     }
     
-    func sendKeyUp ()
+    public func sendKeyUp ()
     {
         send (terminal.applicationCursor ? EscapeSequences.moveUpApp : EscapeSequences.moveUpNormal)
     }
     
-    func sendKeyDown ()
+    public func sendKeyDown ()
     {
         send (terminal.applicationCursor ? EscapeSequences.moveDownApp : EscapeSequences.moveDownNormal)
     }
@@ -2934,12 +2934,12 @@ extension TerminalView {
         }
     }
     
-    func sendKeyLeft()
+    public func sendKeyLeft()
     {
         sendHorizontalKey(left: true)
     }
     
-    func sendKeyRight ()
+    public func sendKeyRight ()
     {
         sendHorizontalKey(left: false)
     }
@@ -3439,6 +3439,32 @@ extension TerminalView {
         }
     }
 
+    public func setCursorStyle(shape: String) {
+        switch shape {
+            case "block":
+                terminal.setCursorStyle(.steadyBlock)
+            case "bar":
+                fallthrough
+            case "beam":
+                terminal.setCursorStyle(.steadyBar)
+            case "underline":
+                terminal.setCursorStyle(.steadyUnderline)
+            case "blinking-block":
+                terminal.setCursorStyle(.blinkBlock)
+            case "blinking-bar":
+                fallthrough
+            case "blinking-beam":
+                terminal.setCursorStyle(.blinkBar)
+            case "blinking-underline":
+                terminal.setCursorStyle(.blinkUnderline)
+            default:
+                terminal.setCursorStyle(.steadyUnderline)
+        }
+    }
+
+    public var isCurrentBufferAlternate : Bool {
+        return terminal.isCurrentBufferAlternate
+    }
 }
 
 #if canImport(UIKit) && DEBUG
