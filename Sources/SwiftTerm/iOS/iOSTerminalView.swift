@@ -385,6 +385,8 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         isAccessibilityElement = true
         accessibilityTraits.formUnion([.staticText, .causesPageTurn])
         accessibilityTextualContext = .sourceCode
+        _nativeFg = UIColor.label
+        _nativeBg = UIColor.systemBackground
         setup()
     }
           
@@ -3793,15 +3795,15 @@ extension TerminalView: UIAccessibilityReadingContent {
     }
 
     public func accessibilityContent(forLineNumber lineNumber: Int) -> String? {
-        // We are on (or after) the command line. Speak the complete line, with insertion point:
-        if (lineNumber >= savedCursorLine) {
-            // first get the prompt:
-            let start = Position(col: 0, row: savedCursorLine)
-            let end = Position(col: savedCursorColumn, row: savedCursorLine)
-            let prompt = terminal.getDisplayText(start: start, end: end)
-            return prompt + " " + currentCommandVoiceOver
-        }
         withTerminal { terminal in
+            // We are on (or after) the command line. Speak the complete line, with insertion point:
+            if (lineNumber >= savedCursorLine) {
+                // first get the prompt:
+                let start = Position(col: 0, row: savedCursorLine)
+                let end = Position(col: savedCursorColumn, row: savedCursorLine)
+                let prompt = terminal.getDisplayText(start: start, end: end)
+                return prompt + " " + currentCommandVoiceOver
+            }
             let startingLine = startingLineLocked(forLineNumber: lineNumber)
             let endingLine = endingLineLocked(forLineNumber: lineNumber)
             let start = Position(col: 0, row: startingLine)

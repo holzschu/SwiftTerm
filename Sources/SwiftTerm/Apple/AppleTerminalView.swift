@@ -2257,10 +2257,9 @@ extension TerminalView {
         private var cellCount: Int = 0
         private var utf16IsCellIdentity = true
         
-        init(column: Int, columnWidth: Int /* , cellWidth: CGFloat */) {
+        init(column: Int, columnWidth: Int) {
             self.column = column
             self.columnWidth = columnWidth
-            // self.cellWidth = cellWidth
         }
         
         var isEmpty: Bool {
@@ -3622,7 +3621,7 @@ extension TerminalView {
     }
     
     /// Queues a frame without waiting for the next display-link callback.
-    func updateDisplay ()
+    public func updateDisplay ()
     {
         requestImmediateFrame()
     }
@@ -4199,12 +4198,12 @@ extension TerminalView {
         send (data: (bytes)[...])
     }
     
-    func sendKeyUp ()
+    public func sendKeyUp ()
     {
         send (withTerminal { $0.applicationCursor } ? EscapeSequences.moveUpApp : EscapeSequences.moveUpNormal)
     }
     
-    func sendKeyDown ()
+    public func sendKeyDown ()
     {
         send (withTerminal { $0.applicationCursor } ? EscapeSequences.moveDownApp : EscapeSequences.moveDownNormal)
     }
@@ -4225,12 +4224,12 @@ extension TerminalView {
         send(sequence)
     }
     
-    func sendKeyLeft()
+    public func sendKeyLeft()
     {
         sendHorizontalKey(left: true)
     }
     
-    func sendKeyRight ()
+    public func sendKeyRight ()
     {
         sendHorizontalKey(left: false)
     }
@@ -4763,6 +4762,33 @@ extension TerminalView {
                 line[c] = CharData.Null
             }
         }
+    }
+
+    public func setCursorStyle(shape: String) {
+        switch shape {
+            case "block":
+                terminal.setCursorStyle(.steadyBlock)
+            case "bar":
+                fallthrough
+            case "beam":
+                terminal.setCursorStyle(.steadyBar)
+            case "underline":
+                terminal.setCursorStyle(.steadyUnderline)
+            case "blinking-block":
+                terminal.setCursorStyle(.blinkBlock)
+            case "blinking-bar":
+                fallthrough
+            case "blinking-beam":
+                terminal.setCursorStyle(.blinkBar)
+            case "blinking-underline":
+                terminal.setCursorStyle(.blinkUnderline)
+            default:
+                terminal.setCursorStyle(.steadyUnderline)
+        }
+    }
+
+    public var isCurrentBufferAlternate : Bool {
+        return terminal.isCurrentBufferAlternate
     }
 
 }
