@@ -387,8 +387,6 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         isAccessibilityElement = true
         accessibilityTraits.formUnion([.staticText, .causesPageTurn])
         accessibilityTextualContext = .sourceCode
-        _nativeFg = UIColor.label
-        _nativeBg = UIColor.systemBackground
         setup()
     }
           
