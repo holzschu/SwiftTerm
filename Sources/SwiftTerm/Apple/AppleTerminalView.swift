@@ -3414,8 +3414,10 @@ extension TerminalView {
     public func clearToEndOfLine() {
         let currentLine = terminal.buffer.yBase + terminal.buffer.y
         let line =  terminal.buffer.lines [currentLine]
-        for x in terminal.buffer.x..<line.count {
-            line[x] = CharData.Null
+        if (terminal.buffer.x < line.count) {
+            for x in terminal.buffer.x..<line.count {
+                line[x] = CharData.Null
+            }
         }
         if (terminal.buffer.yBase + terminal.buffer.y + 1 <= terminal.buffer.lines.count) {
             for l in terminal.buffer.yBase + terminal.buffer.y + 1..<terminal.buffer.lines.count {

@@ -95,11 +95,11 @@ public final class Buffer {
         get { return _y }
         set(newValue) {
             if newValue < 0 {
-                #if DEBUG
-                abort()
-                #else
+                // #if DEBUG
+                // abort()
+                // #else
                 return
-                #endif
+                // #endif
             }
             _y = newValue
         }
