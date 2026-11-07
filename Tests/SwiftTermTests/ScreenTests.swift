@@ -135,6 +135,22 @@ final class ScreenTests {
         TerminalTestHarness.assertLineText(terminal.buffer, row: 3, equals: "")
     }
 
+    @Test func testDeleteCharactersKeepsLTRContinuationForReflow() {
+        let (terminal, _) = TerminalTestHarness.makeTerminal(
+            cols: 5, rows: 4, scrollback: 10)
+        terminal.feed(text: "abcdef\r\nX")
+        #expect(TerminalTestHarness.isWrapped(buffer: terminal.buffer, row: 1) == true)
+
+        terminal.feed(text: "\u{1b}[1;2H\u{1b}[P")
+        #expect(TerminalTestHarness.isWrapped(buffer: terminal.buffer, row: 1) == true)
+
+        terminal.feed(text: "\u{1b}[3;2H")
+        terminal.resize(cols: 10, rows: 4)
+
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 0, equals: "acde f")
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 1, equals: "X")
+    }
+
     @Test func testReadWriteSingleLine() {
         let (terminal, _) = TerminalTestHarness.makeTerminal(cols: 80, rows: 24, scrollback: 10)
         terminal.feed(text: "hello, world")
@@ -397,6 +413,33 @@ final class ScreenTests {
         TerminalTestHarness.assertLineText(terminal.buffer, row: 2, equals: "line1")
         TerminalTestHarness.assertLineText(terminal.buffer, row: 3, equals: "line2")
         TerminalTestHarness.assertLineText(terminal.buffer, row: 4, equals: "line3")
+    }
+
+    /// From Ghostty: Terminal: scrollDown left/right scroll region
+    @Test func testScrollDownLeftRightMargins() {
+        let (terminal, _) = TerminalTestHarness.makeTerminal(cols: 10, rows: 10, scrollback: 0)
+        terminal.feed(text: "ABC123\r\nDEF456\r\nGHI789")
+        terminal.feed(text: "\(esc)[?69h")
+        terminal.feed(text: "\(esc)[2;4s")
+        terminal.feed(text: "\(esc)[2;2H")
+        terminal.feed(text: "\(esc)[1T")
+
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 0, equals: "A   23")
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 1, equals: "DBC156")
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 2, equals: "GEF489")
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 3, equals: " HI7")
+    }
+
+    @Test func testScrollDownOnAlternateBufferUsesFullWidthByDefault() {
+        let (terminal, _) = TerminalTestHarness.makeTerminal(cols: 4, rows: 4, scrollback: 0)
+        terminal.feed(text: "\(esc)[?1049h")
+        terminal.feed(text: "A0\r\nB1\r\nC2\r\nD3")
+        terminal.feed(text: "\(esc)[1T")
+
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 0, equals: "")
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 1, equals: "A0")
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 2, equals: "B1")
+        TerminalTestHarness.assertLineText(terminal.buffer, row: 3, equals: "C2")
     }
 
     /// Test cursor movement: CUU (up), CUD (down), CUF (forward), CUB (back)

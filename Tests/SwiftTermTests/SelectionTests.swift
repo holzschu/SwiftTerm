@@ -8,10 +8,15 @@
 import Foundation
 import Testing
 
+#if os(macOS)
+import AppKit
+#endif
+
 @testable import SwiftTerm
 
+@MainActor
 final class SelectionTests: TerminalDelegate {
-    func send(source: Terminal, data: ArraySlice<UInt8>) {
+    nonisolated func send(source: Terminal, data: ArraySlice<UInt8>) {
         print ("here")
     }
     
@@ -65,7 +70,7 @@ final class SelectionTests: TerminalDelegate {
         let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 10, height: 10)))
 
         for _ in 0..<100 {
-            view.terminal.feed (text: "12345")
+            view.feed (text: "12345")
         }
 
         // Scroll all the way down, check the bottom-left corner
@@ -75,6 +80,77 @@ final class SelectionTests: TerminalDelegate {
         // Scroll all the way back up, check the top-left corner
         view.scrollTo(row: 1)
         #expect(view.calculateMouseHit(at: CGPoint(x: 0, y: 10)).grid.row == 1)
+    }
+
+    @Test func testScrollToMarksTerminalAsUserScrolling() {
+        let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 400, height: 100)))
+
+        for i in 0..<30 {
+            view.feed(text: "line \(i)\r\n")
+        }
+
+        let bottom = view.withTerminal { $0.displayBuffer.yDisp }
+        let target = max(0, bottom - 3)
+        view.scrollTo(row: target)
+
+        #expect(view.withTerminal { $0.userScrolling })
+        view.feed(text: "incoming\r\n")
+        #expect(view.withTerminal { $0.displayBuffer.yDisp } == target)
+
+        let yBase = view.withTerminal { $0.displayBuffer.yBase }
+        view.scrollTo(row: yBase)
+        #expect(!view.withTerminal { $0.userScrolling })
+    }
+
+    @Test func testZeroSizedResizeDoesNotChangeTerminalDimensions() {
+        let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 320, height: 160)))
+        let (originalCols, originalRows) = view.withTerminal { ($0.cols, $0.rows) }
+
+        let changed = view.processSizeChange(newSize: .zero)
+
+        #expect(!changed)
+        #expect(view.withTerminal { $0.cols } == originalCols)
+        #expect(view.withTerminal { $0.rows } == originalRows)
+    }
+
+    @Test func testSelectionColorsOverrideCellAndDecorationColors() {
+        let view = TerminalView(frame: CGRect(origin: .zero, size: .init(width: 320, height: 160)))
+        let selectionBackground = NSColor(srgbRed: 0, green: 166.0 / 255.0, blue: 178.0 / 255.0, alpha: 1.0)
+        let selectionForeground = NSColor.black
+
+        func matchesSRGB(_ value: Any?, _ expected: NSColor) -> Bool {
+            guard let actual = value as? NSColor,
+                  let actual = actual.usingColorSpace(.sRGB),
+                  let expected = expected.usingColorSpace(.sRGB) else {
+                return false
+            }
+            return abs(actual.redComponent - expected.redComponent) < 0.000_001
+                && abs(actual.greenComponent - expected.greenComponent) < 0.000_001
+                && abs(actual.blueComponent - expected.blueComponent) < 0.000_001
+                && abs(actual.alphaComponent - expected.alphaComponent) < 0.000_001
+        }
+
+        #expect(view.selectedTextBackgroundColor.isEqual(selectionBackground))
+        #expect(view.selectedTextForegroundColor.isEqual(selectionForeground))
+
+        view.feed(text: "\u{001B}[31;44;4;9mX")
+        view.withTerminal { _ in
+            view.selection.setSelection(start: Position(col: 0, row: 0), end: Position(col: 1, row: 0))
+        }
+
+        let renderedLine = view.withTerminal { terminal in
+            view.buildAttributedStringLocked(
+                row: 0,
+                line: terminal.displayBuffer.lines[0],
+                cols: terminal.cols
+            )
+        }
+        let attributes = renderedLine.segments[0].attributedString.attributes(at: 0, effectiveRange: nil)
+
+        #expect((attributes[.selectionBackgroundColor] as? NSColor)?.isEqual(selectionBackground) == true)
+        #expect(matchesSRGB(attributes[.foregroundColor], selectionForeground))
+        #expect(matchesSRGB(attributes[.underlineColor], selectionForeground))
+        #expect(matchesSRGB(attributes[.strikethroughColor], selectionForeground))
     }
 #endif
 
@@ -113,6 +189,55 @@ final class SelectionTests: TerminalDelegate {
         #expect(selection.end.row == 1)
         #expect(selection.start.col == 0)
         #expect(selection.end.col == terminal.cols - 1)
+    }
+
+    @Test func rowDragExtendsToCompleteRows() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 5))
+        let selection = SelectionService(terminal: terminal)
+
+        selection.select(row: 1)
+        selection.dragExtend(bufferPosition: Position(col: 4, row: 3))
+
+        #expect(selection.start == Position(col: 0, row: 1))
+        #expect(selection.end == Position(col: 9, row: 3))
+        #expect(selection.selectionMode == .row)
+    }
+
+    @Test func rowDragKeepsItsAnchorWhenDirectionChanges() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 5))
+        let selection = SelectionService(terminal: terminal)
+
+        selection.select(row: 2)
+        selection.dragExtend(bufferPosition: Position(col: 4, row: 0))
+        #expect(selection.start == Position(col: 0, row: 0))
+        #expect(selection.end == Position(col: 9, row: 2))
+
+        selection.dragExtend(bufferPosition: Position(col: 4, row: 4))
+        #expect(selection.start == Position(col: 0, row: 2))
+        #expect(selection.end == Position(col: 9, row: 4))
+    }
+
+    @Test func rowShiftExtendUsesCompleteRows() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 5))
+        let selection = SelectionService(terminal: terminal)
+
+        selection.select(row: 2)
+        selection.shiftExtend(bufferPosition: Position(col: 4, row: 0))
+
+        #expect(selection.start == Position(col: 0, row: 0))
+        #expect(selection.end == Position(col: 9, row: 2))
+    }
+
+    @Test func rowPivotExtendUsesCompleteRows() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 10, rows: 5))
+        let selection = SelectionService(terminal: terminal)
+
+        selection.select(row: 2)
+        selection.pivot = selection.end
+        selection.pivotExtend(bufferPosition: Position(col: 4, row: 0))
+
+        #expect(selection.start == Position(col: 0, row: 0))
+        #expect(selection.end == Position(col: 9, row: 2))
     }
 
     /// Test select all
@@ -317,5 +442,38 @@ final class SelectionTests: TerminalDelegate {
         // The position should be set
         #expect(selection.start.col == 3)
         #expect(selection.end.col == 3)
+    }
+
+    /// After a double-click word selection, dragging *backwards* (to the left)
+    /// must keep the seed word in the selection. Regression test: previously the
+    /// drag pinned `start` to the seed word's start and dropped the seed word,
+    /// so dragging from "bbb" onto "aaa" selected only "aaa ".
+    @Test func testWordDragExtendBackwardIncludesSeedWord() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 1))
+        let selection = SelectionService(terminal: terminal)
+        terminal.feed(text: "aaa bbb ccc")
+
+        // Double-click "bbb"
+        selection.selectWordOrExpression(at: Position(col: 5, row: 0), in: terminal.buffer)
+        #expect(selection.getSelectedText() == "bbb")
+
+        // Drag left into "aaa"
+        selection.dragExtend(row: 0, col: 1)
+        #expect(selection.getSelectedText() == "aaa bbb")
+    }
+
+    /// After a double-click word selection, dragging forwards extends the
+    /// selection by whole words (this already worked and must keep working).
+    @Test func testWordDragExtendForwardExtendsByWords() {
+        let terminal = Terminal(delegate: self, options: TerminalOptions(cols: 20, rows: 1))
+        let selection = SelectionService(terminal: terminal)
+        terminal.feed(text: "aaa bbb ccc")
+
+        // Double-click "bbb"
+        selection.selectWordOrExpression(at: Position(col: 5, row: 0), in: terminal.buffer)
+
+        // Drag right into "ccc"
+        selection.dragExtend(row: 0, col: 9)
+        #expect(selection.getSelectedText() == "bbb ccc")
     }
 }

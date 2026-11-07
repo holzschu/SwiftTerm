@@ -53,6 +53,18 @@ final class DcsTests {
         // Response format: DCS 1 $ r <SGR params> m ST
     }
 
+    /// DECRQSS with a non-ASCII payload byte: the payload does not decode as
+    /// ASCII, and the unknown-request branch must answer rather than crash.
+    @Test func testDecrqssNonAsciiPayload() {
+        let h = HeadlessTerminal(queue: SwiftTermTests.queue) { _ in }
+        let t = h.terminal!
+
+        // DECRQSS (ESC P $ q <0xA0> ESC \) with a non-ASCII payload byte.
+        t.feed(byteArray: [0x1b, 0x50, 0x24, 0x71, 0xa0, 0x1b, 0x5c])
+
+        // Should not crash.
+    }
+
     /// Test DECRQSS for DECSTBM (scrolling region)
     @Test func testDecrqssDecstbm() {
         let h = HeadlessTerminal(queue: SwiftTermTests.queue) { _ in }
@@ -77,6 +89,20 @@ final class DcsTests {
         t.feed(text: "\(esc)Pq#0;2;0;0;0~\(esc)\\")
 
         // Should process without crashing
+    }
+
+    /// A final sixel band does not need to end with '$' or '-'.
+    @Test func testDcsSixelFinalBandWithoutCursorMovement() {
+        let h = HeadlessTerminal(queue: SwiftTermTests.queue) { _ in }
+        let t = h.terminal!
+
+        // Regression test for a zero-width allocation followed by a pixel write.
+        t.feed(text: "\(esc)Pq\"1;1;1;1#0;2;100;0;0#0!1~\(esc)\\")
+
+        #expect(h.images.count == 1)
+        #expect(h.images[0].1 == 1)
+        #expect(h.images[0].2 == 6)
+        #expect(h.images[0].0.count == 24)
     }
 
     /// Test Sixel with parameters (aspect ratio, background)
@@ -206,16 +232,29 @@ final class DcsTests {
 
     /// Test DECRQSS for cursor style (DECSCUSR)
     @Test func testDecrqssDecscusr() {
-        let h = HeadlessTerminal(queue: SwiftTermTests.queue) { _ in }
-        let t = h.terminal!
+        let (terminal, delegate) = TerminalTestHarness.makeTerminal()
 
         // Set cursor style to blinking bar
-        t.feed(text: "\(esc)[5 q")
+        terminal.feed(text: "\(esc)[5 q")
 
         // Query cursor style
-        t.feed(text: "\(esc)P$q q\(esc)\\")
+        terminal.feed(text: "\(esc)P$q q\(esc)\\")
 
-        // Terminal should respond with cursor style
+        #expect(delegate.sentData.last == Array("\(esc)P1$r5 q\(esc)\\".utf8))
+    }
+
+    @Test func testDecscusrZeroRestoresStartupStyle() {
+        let delegate = TerminalTestDelegate()
+        let terminal = Terminal(
+            delegate: delegate,
+            options: TerminalOptions(cursorStyle: .steadyUnderline)
+        )
+
+        terminal.feed(text: "\(esc)[5 q\(esc)[0 q")
+        #expect(terminal.options.cursorStyle == .steadyUnderline)
+
+        terminal.feed(text: "\(esc)P$q q\(esc)\\")
+        #expect(delegate.sentData.last == Array("\(esc)P1$r4 q\(esc)\\".utf8))
     }
 }
 #endif

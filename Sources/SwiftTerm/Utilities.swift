@@ -36,7 +36,7 @@ struct UnicodeUtil {
     static let s6: UInt8 = 0x04 // accept 0, size 4
     static let s7: UInt8 = 0x44 // accept 4, size 4
 
-    private static var first : [UInt8] =  [
+    private static let first : [UInt8] =  [
         //   1   2   3   4   5   6   7   8   9   A   B   C   D   E   F
         a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, // 0x00-0x0F
         a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, a1, // 0x10-0x1F
@@ -289,13 +289,42 @@ struct UnicodeUtil {
         return 0
     }
 
-    private static func isFullwidthModifierSymbol (_ value: UInt32) -> Bool
-    {
-        return value == 0xFF3E || value == 0xFF40 || value == 0xFFE3
-    }
-
     static func isRegionalIndicator(_ scalar: UnicodeScalar) -> Bool {
         return scalar.value >= 0x1F1E6 && scalar.value <= 0x1F1FF
+    }
+
+    /// Same result as Unicode.Scalar.Properties.isVariationSelector without
+    /// the property-trie lookup. Variation_Selector is a closed set: the
+    /// Mongolian free variation selectors, VS1-16, and VS17-256.
+    @inline(__always)
+    static func isVariationSelector (_ value: UInt32) -> Bool {
+        switch value {
+        case 0xFE00...0xFE0F, 0x180B...0x180D, 0x180F, 0xE0100...0xE01EF:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Same result as Unicode.Scalar.Properties.isEmojiModifier without the
+    /// property-trie lookup. Emoji_Modifier is exactly the five skin tones.
+    @inline(__always)
+    static func isEmojiModifier (_ value: UInt32) -> Bool {
+        return value >= 0x1F3FB && value <= 0x1F3FF
+    }
+
+    /// Same result as Unicode.Scalar.Properties.canonicalCombiningClass !=
+    /// .notReordered without the property-trie lookup, whose runtime-sized
+    /// Properties value forces stack probes into every caller. The generated
+    /// table lists the ranges with a nonzero canonical combining class; the
+    /// lowest is U+0300, so ASCII and Latin-1 return without searching.
+    @inline(__always)
+    static func isCombining (_ value: UInt32) -> Bool {
+        if value < 0x0300 {
+            return false
+        }
+        let table = UnicodeWidthData.nonzeroCombiningClass
+        return bisearch(rune: value, table: table, max: table.count - 1) != 0
     }
 
     static func isEmojiVs16Base (rune: UnicodeScalar) -> Bool
@@ -306,12 +335,38 @@ struct UnicodeUtil {
         return bisearch(rune: rune.value, table: UnicodeWidthData.emojiVs16Base, max: UnicodeWidthData.emojiVs16Base.count - 1) != 0
     }
 
-    private static func isEastAsianWide (_ value: UInt32) -> Bool
+    /**
+     * True for a lone symbol whose Unicode default presentation is text (Emoji=Yes,
+     * Emoji_Presentation=No) and that carries no explicit variation selector.
+     *
+     * Renderers append U+FE0E (text variation selector) to such characters before shaping:
+     * when the base font lacks a glyph, Core Text's font fallback on iOS resolves them to
+     * Apple Color Emoji (e.g. U+2733 under SF Mono), rendering a full-color emoji where the
+     * terminal should show a monochrome, foreground-tinted glyph. An explicit VS15 steers
+     * the cascade to a text-presentation font instead, matching the Unicode default.
+     *
+     * Clusters that already carry a variation selector (VS15 or VS16) or any combining
+     * scalar are left untouched — the stream made an explicit choice.
+     */
+    static func prefersTextPresentation (_ ch: Character) -> Bool
     {
-        if UnicodeWidthData.eastAsianWide.isEmpty {
+        let scalars = ch.unicodeScalars
+        guard scalars.count == 1, let scalar = scalars.first else {
             return false
         }
-        return bisearch(rune: value, table: UnicodeWidthData.eastAsianWide, max: UnicodeWidthData.eastAsianWide.count - 1) != 0
+        // ASCII-range emoji bases (#, *, 0-9) always have text glyphs in the base font.
+        guard scalar.value > 0xFF else {
+            return false
+        }
+        let properties = scalar.properties
+        return properties.isEmoji && !properties.isEmojiPresentation
+    }
+
+    /// The character as a shaping-ready string, with U+FE0E appended when
+    /// `prefersTextPresentation` applies.
+    static func textPresentationAdjusted (_ ch: Character) -> String
+    {
+        return prefersTextPresentation(ch) ? String(ch) + "\u{FE0E}" : String(ch)
     }
 
     /**
@@ -320,61 +375,12 @@ struct UnicodeUtil {
      *   -1 if the value is not printable, otherwise the number of columsn that the rune occupies.
      * - Parameter rune: a UnicodeScalar
      */
+    @inline(__always)
     static func columnWidth (rune: UnicodeScalar) -> Int
     {
-        let irune = rune.value
-
-        if irune == 0 {
-            return 0
-        }
-	// control characeters return -1
-        if irune < 0x20 {
-            return -1
-        }
-	// ascii letters use one column
-        if irune < 0x7f {
+        if rune.value >= 0x20 && rune.value < 0x7F {
             return 1
         }
-	// C1 control characters (0x7F-0x9F) return -1
-        // Note: 0xA0 (NO-BREAK SPACE) is excluded - it should have width 1
-        if irune < 0xA0 {
-            return -1
-        }
-//        if irune < 127 {
-//            return 1
-//        }
-
-        let props = rune.properties
-        switch props.generalCategory {
-        case .nonspacingMark, .spacingMark, .enclosingMark:
-            return 0
-        case .format:
-            return irune == 0x00AD ? 1 : 0
-        case .lineSeparator, .paragraphSeparator:
-            return 0
-        case .modifierSymbol:
-            if props.isEmojiModifier {
-                return 0
-            }
-            if isFullwidthModifierSymbol(irune) {
-                return 2
-            }
-        default:
-            break
-        }
-
-        if (irune >= 0x1160 && irune <= 0x11FF) || (irune >= 0xD7B0 && irune <= 0xD7FF) {
-            return 0
-        }
-
-        if isRegionalIndicator(rune) {
-            return 2
-        }
-
-        if isEastAsianWide(irune) {
-            return 2
-        }
-
-        return 1
+        return UnicodeWidthData.columnWidth (rune.value)
     }
 }

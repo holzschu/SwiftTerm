@@ -5,7 +5,11 @@
 //
 
 import Foundation
-#if os(Linux)
+#if canImport(Musl)
+// The Swift Static Linux SDK builds against musl, where the C library module
+// is `Musl` and `Glibc` does not exist.
+import Musl
+#elseif canImport(Glibc)
 import Glibc
 #elseif os(Windows)
 import WinSDK
@@ -845,7 +849,10 @@ extension Terminal {
             guard realpath(cstr, &buffer) != nil else {
                 return nil
             }
-            return String(cString: buffer)
+            let end = buffer.firstIndex(of: 0) ?? buffer.endIndex
+            return String(
+                decoding: buffer[..<end].map { UInt8(bitPattern: $0) },
+                as: UTF8.self)
         }
     }
     #endif
@@ -1649,8 +1656,16 @@ extension Terminal {
                 maxLine = max(maxLine, idx)
             }
         }
-        if !removedKeys.isEmpty, buffer === self.buffer, minLine <= maxLine {
-            updateRange(startLine: minLine, endLine: maxLine)
+        if minLine <= maxLine, buffer === self.buffer {
+            // Convert absolute buffer line indices to display-relative row indices.
+            // minLine/maxLine are indices into buffer.lines[], while updateRange expects
+            // 0-based display rows (0 = top of viewport). For the alternate screen yBase==0
+            // so they coincide, but for the normal screen with scrollback they differ.
+            let displayMin = minLine - buffer.yBase
+            let displayMax = maxLine - buffer.yBase
+            if displayMax >= 0 && displayMin < rows {
+                updateRange(startLine: max(0, displayMin), endLine: min(rows - 1, displayMax))
+            }
         }
         return removedKeys
     }
@@ -1672,11 +1687,20 @@ extension Terminal {
 
     private func removePlacementRecords(_ predicate: (KittyPlacementRecord) -> Bool) -> Set<KittyPlacementKey> {
         var removed = Set<KittyPlacementKey>()
+        var needsFullRedraw = false
         for (key, record) in kittyGraphicsState.placementsByKey where predicate(record) {
             removed.insert(key)
+            if record.isVirtual && record.isAlternateBuffer == isCurrentBufferAlternate {
+                needsFullRedraw = true
+            }
         }
         for key in removed {
             kittyGraphicsState.placementsByKey.removeValue(forKey: key)
+        }
+        if needsFullRedraw {
+            // Virtual placements draw through Unicode placeholders. They have no
+            // line image, so removing them does not otherwise invalidate pixels.
+            updateFullScreen()
         }
         return removed
     }

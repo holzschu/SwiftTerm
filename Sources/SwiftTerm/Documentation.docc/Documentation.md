@@ -40,12 +40,14 @@ testing, and screen-scraping terminal output.
 ### Features
 
 - Unicode rendering including Emoji, combining characters, and grapheme clusters
+- Bidirectional text (Arabic, Hebrew) following the [terminal-wg BiDi recommendation](https://terminal-wg.pages.freedesktop.org/bidi/), with Arabic contextual shaping — see <doc:BiDi>
 - Colors: ANSI, 256-color, and TrueColor
 - Text attributes: bold, italic, underline, strikethrough, dim/faint, blink, inverse
 - Mouse event reporting (X10, SGR, UTF-8, URxvt protocols)
 - Terminal resizing (local and remote-initiated)
 - Hyperlink support (OSC 8)
 - Configurable Apple view link tracking via ``LinkReporting`` (explicit OSC 8 and implicit URL detection)
+- Optional GPU-accelerated rendering via Metal (macOS, iOS, visionOS)
 - Graphics: Sixel, iTerm2-style inline images, and Kitty graphics protocol
 - Selection and search with a built-in macOS find bar and programmable search APIs
 - Thread-safe ``Terminal`` instances
@@ -62,6 +64,8 @@ testing, and screen-scraping terminal output.
 
 ### Views
 
+- <doc:Embedding>
+- <doc:AdoptingTheRenderLoop>
 - ``TerminalView``
 - ``TerminalViewDelegate``
 
@@ -79,7 +83,13 @@ testing, and screen-scraping terminal output.
 
 ### Guides
 
+- <doc:MigratingFrom1To2>
+- <doc:GettingStarted>
+- <doc:Embedding>
+- <doc:AdoptingTheRenderLoop>
 - <doc:Customization>
+- <doc:BiDi>
+- <doc:GPURendering>
 - <doc:GraphicsSupport>
 - <doc:SSHIntegration>
 
@@ -108,9 +118,24 @@ testing, and screen-scraping terminal output.
 
 ### Selection and Search
 
+- <doc:Search>
 - ``SelectionService``
 - ``SearchService``
 - ``SearchOptions``
+
+### Bidirectional Text
+
+- <doc:BiDi>
+- ``BidiPresentationState``
+- ``BidiPresentationMode``
+- ``BidiSupportMode``
+- ``BidiDirection``
+- ``BidiHostPolicy``
+
+### GPU Rendering
+
+- ``MetalBufferingMode``
+- ``MetalError``
 
 ### Graphics
 

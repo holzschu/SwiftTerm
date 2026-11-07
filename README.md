@@ -10,19 +10,28 @@ custom scenarios. It has been used in several commercially available SSH clients
 
 Check the [API Documentation](https://migueldeicaza.github.io/SwiftTerm/documentation/swiftterm/)
 
+This README and the API documentation describe the new SwiftTerm 2.0 API. To
+use the SwiftTerm 1.x API, use the [`v1.x` branch](https://github.com/migueldeicaza/SwiftTerm/tree/v1.x)
+or a [tagged 1.x release](https://github.com/migueldeicaza/SwiftTerm/tags).
+
+If you use SwiftTerm 1.0, read the [SwiftTerm 2.0 migration guide](https://migueldeicaza.github.io/SwiftTerm/documentation/swiftterm/migratingfrom1to2/).
+
 This repository contains both a terminal emulator engine that is UI agnostic, as well as
 front-ends for this engine for iOS using UIKit, and macOS using AppKit.   A curses-based
 terminal emulator (to emulate an xterm inside a console application) is available as
 part of the [TermKit](https://github.com/migueldeicaza/TermKit) library. 
 
-**Sample Code** There are a couple of minimal sample apps for Mac and iOS showing how to 
-use the library inside the `TerminalApp` directory.   
+Community
+=========
 
-* The sample Mac app has much of the functionality of MacOS' Terminal.app, but without the configuration UI.   
-* The sample iOS application uses an SSH library to connect to a remote system (as there is no native shell
-on iOS to run) and includes a login UI to configure the connection. 
+* [Discord](https://discord.gg/rgN3yzHg8G) server
+* [GitHub Discussions](https://github.com/migueldeicaza/SwiftTerm/discussions)
+* [GitHub Issues](https://github.com/migueldeicaza/SwiftTerm/issues)
 
 ## Companion Apps
+
+[Tecolot](https://github.com/migueldeicaza/Tecolot) is a MacOS Terminal.app
+replacement.
 
 [SwiftTermApp](https://github.com/migueldeicaza/SwiftTermApp) builds
 an actual iOS app that uses this library and is more complete than the
@@ -31,6 +40,13 @@ It is a proof of concept for what you would need to do.
 
 [Pane](https://github.com/migueldeicaza/pane) is a terminal
 multiplexor, similar to tmux.
+
+**Sample Code** There are a couple of minimal sample apps for Mac and iOS showing how to 
+use the library inside the `TerminalApp` directory.   
+
+* The sample Mac app has much of the functionality of MacOS' Terminal.app, but without the configuration UI.   
+* The sample iOS application uses an SSH library to connect to a remote system (as there is no native shell
+on iOS to run) and includes a login UI to configure the connection. 
 
 ## History
 
@@ -50,6 +66,7 @@ Features
 
 * Pretty decent terminal emulation, on or better than XtermSharp and xterm.js (and more comprehensive in many ways)
 * Unicode rendering (including Emoji, and combining characters and emoji)
+* Bidirectional text (Arabic, Hebrew) following the [terminal-wg BiDi recommendation](https://terminal-wg.pages.freedesktop.org/bidi/), with Arabic contextual shaping
 * Reusable and pluggable engine allows multiple user interfaces to be built on top of it:
    *  Bundled MacOS and iOS
    *  Bundled Headless terminal.
@@ -71,7 +88,22 @@ Features
 * Terminal session recording and playback with termcast
 * Thread-safe Terminal instances
 * Fuzzed and abused
+* Optional GPU-accelerated rendering via Metal (macOS, iOS, visionOS)
 * Seems pretty fast to me
+
+### Image formats
+
+SwiftTerm supports these image data formats:
+
+* **Sixel** image streams.
+* **PNG** images through the iTerm2 and Kitty graphics protocols.
+* **JPEG** images through the iTerm2 graphics protocol.
+* **Raw RGB** (24-bit) and **RGBA** (32-bit) pixel data through the Kitty
+  graphics protocol.
+
+For iTerm2 images, the Apple views use the system image decoder. Other image
+formats that the target platform can decode can also work, but PNG and JPEG
+are the tested formats.
 
 # SwiftTerm library
 
@@ -216,6 +248,51 @@ test suite to run.
 If using Xcode, you can select the "SwiftTerm" project, and then use Command-U 
 to run the test suite.
 
+## Bidirectional text (BiDi)
+
+SwiftTerm implements the [terminal-wg BiDi
+recommendation](https://terminal-wg.pages.freedesktop.org/bidi/) for
+right-to-left and mixed-direction text on the Apple views (both the
+CoreGraphics and Metal renderers):
+
+* The buffer stays in logical order; each paragraph is reordered at render
+  time with the Unicode Bidirectional Algorithm, with Arabic contextual
+  shaping, lam-alef ligatures, and bracket mirroring.
+* All six presentation modes from the recommendation are supported:
+  implicit/explicit, fixed LTR/RTL, and autodetection from the first strong
+  character. The default (implicit + autodetect + LTR fallback) renders RTL
+  text correctly out of the box and leaves LTR output unchanged.
+* Terminal applications control the behavior with the standard sequences:
+  BDSM (`CSI 8 h/l`), SCP (`CSI Ps SP k`), and DEC private modes 2501
+  (autodetection), 2500 (box-drawing mirroring), and 1243 (arrow-key
+  swapping), including DECRQM queries and XTSAVE/XTRESTORE.
+* Embedders can set the initial state through `TerminalOptions`
+  (`initialBidiState`, `initialBidiArrowKeySwap`, `maximumBidiParagraphRows`),
+  inspect it via `Terminal.currentBidiState`, and opt a view out entirely
+  with `TerminalView.bidiHostPolicy = .legacyLeftToRight`.
+
+The details are in the [BiDi
+documentation](https://migueldeicaza.github.io/SwiftTerm/documentation/swiftterm/bidi).
+
+## BiDi visual test harness
+
+The [SwiftTerm BiDi harness](Tools/BidiHarness/README.md) is an AppKit app for
+visual BiDi tests. It shows SwiftTerm beside a WebKit reference. Its scenarios
+cover paragraph reflow, terminal modes, reset behavior, box mirroring,
+combining marks, selection, cursor movement, and scrollback.
+
+Run it from the repository root:
+
+```sh
+Tools/BidiHarness/Scripts/run-harness.sh --artifacts /tmp/bidi-artifacts
+```
+
+Use the controls in the app to select a scenario, move through its steps,
+resize the terminal, scroll, change the renderer, and save a capture. The app
+also has a local control socket for repeatable test runs. See the harness README
+for the control commands, Xcode instructions, artifact paths, and the macOS
+permission that Metal window capture needs.
+
 Screenshots
 ===========
 
@@ -228,9 +305,8 @@ Midnight Commander
 <img width="969" alt="Screen Shot 2020-04-12 at 12 17 49 AM" src="https://user-images.githubusercontent.com/36863/79060466-49c50580-7c53-11ea-8514-bb4a31359662.png">
 
 Solid UTF-8 support, excellent rendering:
-<img width="799" alt="Screen Shot 2020-04-22 at 11 25 30 PM" src="https://user-images.githubusercontent.com/36863/80055786-95e43580-84f0-11ea-86dd-8dfb7f062b39.png">
-
-<img width="799" alt="Screen Shot 2020-04-22 at 11 25 24 PM" src="https://user-images.githubusercontent.com/36863/80055792-9977bc80-84f0-11ea-8cac-735d4a516a80.png">
+<img width="891" height="1699" alt="Image" src="https://github.com/user-attachments/assets/cb55eddb-ae96-417c-9fea-fb75faab2db2" />
+<img width="891" height="1699" alt="Image" src="https://github.com/user-attachments/assets/ae468839-b8d2-402c-8174-d519a84647e1" />
 
 Supports hyperlinks emitted by modern apps:
 

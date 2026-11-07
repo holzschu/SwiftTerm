@@ -40,14 +40,13 @@ terminalView.nativeBackgroundColor = NSColor.black    // or UIColor.black
 
 ### ANSI Palette
 
-To install a custom 256-color palette, use ``Terminal/installPalette(colors:)``.
-The array must contain exactly 256 ``Color`` values — the first 16 are the
-standard ANSI colors, 16-231 are the 6x6x6 color cube, and 232-255 are the
-greyscale ramp:
+To install custom base ANSI colors on a view, use
+``TerminalView/installColors(_:)``.
+The array must contain exactly 16 ``Color`` values. SwiftTerm derives entries
+16 through 255 from these colors and the selected ANSI 256 strategy:
 
 ```swift
-let terminal = terminalView.getTerminal()
-terminal.installPalette(colors: myCustomPalette)
+terminalView.installColors(myCustomPalette)
 ```
 
 ### Selection and Cursor Colors
@@ -177,6 +176,22 @@ let options = TerminalOptions(
 )
 ```
 
+BiDi left/right arrow swapping requires opt-in. Set its initial value when you
+create the terminal, or change the live terminal state later:
+
+```swift
+let options = TerminalOptions(initialBidiArrowKeySwap: true)
+let terminal = Terminal(delegate: delegate, options: options)
+
+terminal.bidiArrowKeySwap = false
+```
+
+A terminal reset restores `initialBidiArrowKeySwap`. Terminal applications can
+also change the live state with DEC private mode 1243.
+
+For the full bidirectional text support — presentation modes, escape
+sequences, and the rendering pipeline — see <doc:BiDi>.
+
 Key options:
 
 | Property | Default | Description |
@@ -188,11 +203,19 @@ Key options:
 | `cursorStyle` | `.blinkBlock` | Initial cursor appearance |
 | `screenReaderMode` | `false` | Accessibility mode |
 | `enableSixelReported` | `true` | Advertise Sixel support to applications |
+| `initialBidiState` | implicit, autodetect, LTR | BiDi state for new paragraphs after startup or reset |
+| `maximumBidiParagraphRows` | `120` | Maximum rows processed as one BiDi paragraph |
+| `initialBidiArrowKeySwap` | `false` | Initial state for BiDi left/right arrow swapping |
 | `kittyImageCacheLimitBytes` | 320 MB | Memory limit for Kitty image cache |
 | `ansi256PaletteStrategy` | `.base16Lab` | 256-color palette generation strategy |
 
-The `.base16Lab` strategy is based on the palette-generation write-up by
+The `.base16Lab` and `.base16LabHarmonious` strategies are based on the
+palette-generation write-up by
 [Jake Stewart](https://gist.github.com/jake-stewart/0a8ea46159a7da2c808e5be2177e1783).
+
+Use `.base16Lab` to keep the generated cube and grayscale ramp ordered dark to
+light even on light themes. Use `.base16LabHarmonious` to preserve the theme's
+native background-to-foreground direction instead.
 
 ## Rendering Options
 
@@ -206,6 +229,25 @@ terminalView.antiAliasCustomBlockGlyphs = true
 
 // Use bright colors for bold text (traditional terminal behavior)
 terminalView.useBrightColors = true
+```
+
+### GPU-Accelerated Rendering
+
+On macOS, iOS, and visionOS, you can switch to a Metal-based rendering path
+that offloads drawing to the GPU. See <doc:GPURendering> for full details.
+
+```swift
+// Enable Metal rendering
+try terminalView.setUseMetal(true)
+
+// Choose a buffering strategy
+terminalView.metalBufferingMode = .perRowPersistent   // default
+terminalView.metalBufferingMode = .perFrameAggregated // for full-screen TUIs
+
+// Check current renderer
+if terminalView.isUsingMetalRenderer {
+    print("GPU rendering active")
+}
 ```
 
 ## Search
