@@ -59,6 +59,30 @@ import UIKit
 import CoreText
 import CoreGraphics
 
+
+enum FloatingDir { case up, down, left, right }
+
+/// Reference point; advanced to the current point every time a move is detected.
+private var fcAnchor: CGPoint = .zero
+
+/// Last detected direction (used for repeating).
+
+private var fcDir: FloatingDir?
+
+/// Number of repeats since the last direction change; drives the acceleration.
+private var fcRepeatCount = 0
+private var fcTimer: Timer?
+
+/// Horizontal threshold (pt) required to trigger one cursor move.
+private let stepX: CGFloat = 5
+
+/// Vertical threshold (pt) required to trigger one cursor move.
+private let stepYNormal: CGFloat = 10
+
+/// Ratio of the other axis threshold; if the other axis has moved at least
+/// this much, the gesture is treated as diagonal and ignored (only when isCurrentBufferAlternate is false).
+private let diagonalTolerance: CGFloat = 0.5
+
 /// UITextInput Log capability
 @inline(__always)
 internal func uitiLog (_ message: @autoclosure () -> String) {
@@ -67,7 +91,7 @@ internal func uitiLog (_ message: @autoclosure () -> String) {
     print ("UITextInput[\(TerminalView.textInputLogCounter)]: \(message())")
 }
 
-extension TerminalView: UITextInput {    
+extension TerminalView: UITextInput {
     func trace (function: String = #function)  {
         uitiLog ("TRACE: \(function)")
     }
@@ -457,60 +481,136 @@ extension TerminalView: UITextInput {
     /*
         Software trackpad when user long press the spacebar.
     */
-    public func beginFloatingCursor(at point: CGPoint)
-    {
-        lastFloatingCursorLocation = point
+    public func beginFloatingCursor(at point: CGPoint) {
+        fcAnchor = point
+        fcDir = nil
+        fcRepeatCount = 0
+        cancelTimer()
     }
 
-    public func updateFloatingCursor(at point: CGPoint)
-    {
-        //uitiLog("updateFloatingCursor(at: \(point)) lastFloatingCursorLocation: \(lastFloatingCursorLocation)")
-        guard let lastPosition = lastFloatingCursorLocation else {
-            return
+    public func updateFloatingCursor(at point: CGPoint) {
+        let dx = point.x - fcAnchor.x
+        let dy = point.y - fcAnchor.y
+        let stepY: CGFloat
+
+        // Normalize each axis by its own threshold so X and Y are compared fairly.
+        if self.isCurrentBufferAlternate {
+            stepY = stepX
+        } else {
+            stepY = stepYNormal
         }
-        let deltax = lastPosition.x - point.x
+
+        let rx = abs(dx) / stepX
+        let ry = abs(dy) / stepY
         
-        // Defines how sensitive the cursor is to "trackpad" movements. 
-        // 5 is a happy medium between fast moving and precise enough.
-        if abs(deltax) > 5 {
-            var data: [UInt8]
-            if deltax > 0 {
-                data = terminal.applicationCursor ? EscapeSequences.moveLeftApp : EscapeSequences.moveLeftNormal
-                // Update the carret to the new position so that deleteBackward will delete the correct character
-                let newOffset = textInputStorage.textInputOffset(_selectedTextRange.startPosition.offset, advancedByUTF16Distance: -1)
-                selectedTextRange = TextRange(from: TextPosition(offset: newOffset), 
-                    to: TextPosition(offset: newOffset))
-            } else {
-                data = terminal.applicationCursor ? EscapeSequences.moveRightApp : EscapeSequences.moveRightNormal
-                // Update the carret to the new position so that deleteForward will delete the correct character
-                let newOffset = textInputStorage.textInputOffset(_selectedTextRange.startPosition.offset, advancedByUTF16Distance: 1)
-                selectedTextRange = TextRange(from: TextPosition(offset: newOffset), 
-                    to: TextPosition(offset: newOffset))
+        // Not moved far enough on either axis yet.
+        guard max(rx, ry) >= 1 else { return }
+
+        // In `isCurrentBufferAlternate == false`, ignore diagonal movement: the non-selected axis must stay
+        // below `diagonalTolerance` of its own threshold.
+        if self.isCurrentBufferAlternate == false {
+            let other = (ry >= rx) ? rx : ry
+            if other >= diagonalTolerance {
+                fcAnchor = point
+                return
             }
-            send (data)
-            lastFloatingCursorLocation = point
         }
 
-        if terminal.isCurrentBufferAlternate {
-            let deltay = lastPosition.y - point.y
+        // Pick the dominant axis and its direction.
+        let dir: FloatingDir
+        if ry >= rx {
+            dir = dy < 0 ? .up : .down
+        } else {
+            dir = dx < 0 ? .left : .right
+        }
 
-            var data: [UInt8]
-            if abs (deltay) > 2 {
-                if deltay > 0 {
-                    data = terminal.applicationCursor ? EscapeSequences.moveUpApp : EscapeSequences.moveUpNormal
-                } else {
-                    data = terminal.applicationCursor ? EscapeSequences.moveDownApp : EscapeSequences.moveDownNormal
+        // Reset acceleration only when the direction changes
+        // (compare BEFORE overwriting fcDir).
+        if dir != fcDir {
+            fcRepeatCount = 0
+        }
+
+        fcDir = dir
+        fcAnchor = point
+        // Move once, then (re)start the hold-repeat timer.
+        self.sendCursorKey(to: dir)
+        scheduleRepeat()
+    }
+
+    public func endFloatingCursor() {
+        cancelTimer()
+        fcDir = nil
+        fcRepeatCount = 0
+    }
+
+    private func scheduleRepeat() {
+        cancelTimer()
+
+        let t = Timer(timeInterval: repeatInterval(for: fcRepeatCount, dir: fcDir), repeats: false) { [weak self] _ in
+            guard let self = self, let dir = fcDir else { return }
+            self.sendCursorKey(to: dir)
+            fcRepeatCount += 1
+            self.scheduleRepeat()   // next tick uses a shorter interval
+        }
+
+        // .common keeps the timer alive during scrolling / tracking.
+        RunLoop.main.add(t, forMode: .common)
+        fcTimer = t
+    }
+
+    private func cancelTimer() {
+        fcTimer?.invalidate()
+        fcTimer = nil
+    }
+
+    private func sendCursorKey(to: FloatingDir) {
+        let data: [UInt8]
+        switch to {
+        case .left:
+            data = terminal.applicationCursor ? EscapeSequences.moveLeftApp : EscapeSequences.moveLeftNormal
+            // Update the carret to the new position so that deleteBackward will delete the correct character
+            let newOffset = textInputStorage.textInputOffset(_selectedTextRange.startPosition.offset, advancedByUTF16Distance: -1)
+            selectedTextRange = TextRange(from: TextPosition(offset: newOffset),
+                                          to: TextPosition(offset: newOffset))
+        case .right:
+            data = terminal.applicationCursor ? EscapeSequences.moveRightApp : EscapeSequences.moveRightNormal
+            // Update the carret to the new position so that deleteForward will delete the correct character
+            let newOffset = textInputStorage.textInputOffset(_selectedTextRange.startPosition.offset, advancedByUTF16Distance: 1)
+            selectedTextRange = TextRange(from: TextPosition(offset: newOffset),
+                                          to: TextPosition(offset: newOffset))
+        case .up:
+            data = terminal.applicationCursor ? EscapeSequences.moveUpApp : EscapeSequences.moveUpNormal
+        case .down:
+            data = terminal.applicationCursor ? EscapeSequences.moveDownApp : EscapeSequences.moveDownNormal
+        }
+        send (data)
+    }
+
+    /// Repeat interval by number of consecutive repeats (longer hold = faster).
+    private func repeatInterval(for count: Int, dir: FloatingDir?) -> TimeInterval {
+        if terminal.isDisplayBufferAlternate {
+            switch count {
+            case 0..<3: return 0.5    // initial (slow)
+            case 3..<8: return 0.25
+            case 8..<13: return 0.1
+            case 13..<18: return 0.05
+            default:    return 0.02    // fastest
+            }
+        } else {
+            switch dir {
+            case .up, .down:
+                switch count {
+                case 0..<3: return 0.7
+                default: return 0.5
                 }
-                send (data)
-                lastFloatingCursorLocation = point
+            default:
+                switch count {
+                case 0..<3: return 0.5
+                default: return 0.3
+                }
             }
         }
     }
     
-    public func endFloatingCursor()
-    {
-        lastFloatingCursorLocation = nil
-    }
 }
-
 #endif
