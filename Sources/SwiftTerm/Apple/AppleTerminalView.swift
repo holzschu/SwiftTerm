@@ -1406,15 +1406,15 @@ extension TerminalView {
         }
     }
 
-    func linkForClick(at position: Position, hasCommandModifier: Bool) -> (link: String, params: [String:String])?
+    func linkForClick(at position: Position, hasCommandModifier: Bool, directTapLookup: Terminal.LinkLookupMode? = nil) -> (link: String, params: [String:String])?
     {
-        let mode: Terminal.LinkLookupMode = implicitLinkCouldBeVisible(hasCommandModifier: hasCommandModifier)
+        let mode = directTapLookup ?? (implicitLinkCouldBeVisible(hasCommandModifier: hasCommandModifier)
             ? .explicitAndImplicit
-            : .explicitOnly
+            : .explicitOnly)
         guard let match = terminal.linkMatch(at: .buffer(position), mode: mode) else {
             return nil
         }
-        guard linkVisibleForClick(match: match, hasCommandModifier: hasCommandModifier) else {
+        guard directTapLookup != nil || linkVisibleForClick(match: match, hasCommandModifier: hasCommandModifier) else {
             return nil
         }
         if match.isExplicit,

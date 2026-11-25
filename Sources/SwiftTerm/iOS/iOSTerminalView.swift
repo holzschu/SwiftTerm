@@ -160,6 +160,10 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
     /// `.explicit` = OSC 8 only, `.implicit` = explicit + implicit fallback, `.none` = off.
     public var linkReporting: LinkReporting = .implicit
 
+    /// Let a single tap activate links without pointer hover. When an app is
+    /// receiving mouse presses, only explicit OSC 8 links take precedence.
+    public var opensLinksOnTap: Bool = false
+
     /// Controls link highlighting and link activation behavior.
     public var linkHighlightMode: LinkHighlightMode = .hover {
         didSet {
@@ -982,17 +986,41 @@ open class TerminalView: UIScrollView, UITextInputTraits, UIKeyInput, UIScrollVi
         return result
     }
 
+    /// Send a link at a point in the terminal view's coordinates to the delegate
+    /// if direct tap activation is enabled. Returns true when a link was sent.
+    @discardableResult
+    public func activateLink(at point: CGPoint) -> Bool
+    {
+        guard opensLinksOnTap, linkReporting != .none, !selection.active,
+              let terminalDelegate, bounds.contains(point),
+              point.x >= 0, point.x < CGFloat(terminal.cols) * cellDimension.width,
+              point.y >= 0, point.y < CGFloat(terminal.displayBuffer.lines.count) * cellDimension.height else {
+            return false
+        }
+        let reportsMousePresses = allowMouseReporting && terminal.mouseMode.sendButtonPress()
+        let lookup: Terminal.LinkLookupMode = linkReporting == .explicit || reportsMousePresses
+            ? .explicitOnly
+            : .explicitAndImplicit
+        let hit = calculateTapHit(point: point).grid
+        guard let result = linkForClick(at: hit, hasCommandModifier: false, directTapLookup: lookup) else {
+            return false
+        }
+        terminalDelegate.requestOpenLink(source: self, link: result.link, params: result.params)
+        return true
+    }
+
     @objc func singleTap (_ gestureRecognizer: UITapGestureRecognizer)
     {
+        guard gestureRecognizer.view != nil, gestureRecognizer.state == .ended else { return }
+        let directTap = opensLinksOnTap && !commandActive && gestureRecognizer.modifierFlags.isEmpty
+        if directTap && activateLink(at: gestureRecognizer.location(in: self)) {
+            return
+        }
+
         if isFirstResponder {
-            guard gestureRecognizer.view != nil else { return }
-
-            if gestureRecognizer.state != .ended {
-                return
-            }
-
             let tapHit = calculateTapHit(gesture: gestureRecognizer).grid
-            if let result = linkForClick(at: tapHit, hasCommandModifier: commandActive) {
+            if !directTap, !(opensLinksOnTap && selection.active),
+               let result = linkForClick(at: tapHit, hasCommandModifier: commandActive) {
                 terminalDelegate?.requestOpenLink(source: self, link: result.link, params: result.params)
                 return
             }

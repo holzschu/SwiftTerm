@@ -124,9 +124,17 @@ terminalView.linkReporting = .implicit  // Default: explicit first, then implici
 
 Important: `.implicit` means "explicit + implicit fallback", not "implicit only."
 
-Link activation is also gated by `linkHighlightMode`. The reporting mode chooses
-how links are discovered during tracking, while highlight mode decides whether a
-click/tap is allowed to open the link.
+By default, `linkHighlightMode` controls whether a click or tap can activate a
+link. `linkReporting` controls which links the view tracks.
+
+On iOS and visionOS, set `terminalView.opensLinksOnTap = true` to let an
+unmodified tap activate a link without checking `linkHighlightMode`. This path
+respects `linkReporting`. With the setting enabled, taps skip link activation
+while a selection is active. When an application requests mouse presses, only
+explicit OSC 8 links take precedence on the direct tap path.
+A host that handles its own focus tap can call `activateLink(at:)` in the terminal
+view's coordinates. The method returns `true` if it delivered a link to the
+delegate, even if the delegate chooses not to open it.
 
 ### What happens when the user activates a link
 
